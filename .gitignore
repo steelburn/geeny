@@ -1,0 +1,21 @@
+# --- replaceable artifacts (large) -------------------------------------------
+# Vendor APK + extraction: only needed to read libcfdlink.so. Both CRC tables and the
+# channel map are already committed in notra/crc.py and the docs.
+Boya+OS_*.xapk
+research/apk/
+
+# adb / platform-tools downloaded by the setup step
+tools/
+
+# Android snoop captures and their bugreport zips (~1 MB each, regenerable)
+research/capture/
+
+# --- build / runtime --------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+node_modules/
+.DS_Store
+Thumbs.db

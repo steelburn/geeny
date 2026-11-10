@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Notra — device console</title>
+<style>
+  :root {
+    --paper: #F5F3ED;
+    --ink: #1E2A24;
+    --ink-soft: #5A6660;
+    --rule: #D8D4C8;
+    --accent: #1E6B50;
+    --accent-soft: #E3EDE7;
+    --danger: #8C3A2B;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+    --r1: 4px; --r2: 8px;
+    --shadow-1: 0 1px 2px rgba(30, 42, 36, .10);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: var(--s6) var(--s5) var(--s7); }
+
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); flex-wrap: wrap; }
+  h1 { font-size: 2rem; line-height: 1.15; margin: 0; letter-spacing: -.02em; font-weight: 700; }
+  h1 .mark { color: var(--accent); }
+  .sub { color: var(--ink-soft); font-size: .9375rem; margin: var(--s1) 0 0; }
+
+  .rule { height: 1px; background: var(--rule); border: 0; margin: var(--s5) 0; }
+
+  .bar { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+  button {
+    font: inherit; font-size: .9375rem; font-weight: 550;
+    padding: var(--s2) var(--s4); border-radius: var(--r2);
+    border: 1px solid var(--rule); background: #FFFDF8; color: var(--ink);
+    cursor: pointer; box-shadow: var(--shadow-1);
+    transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
+  }
+  button:hover:not(:disabled) { background: #FFFFFF; border-color: #C7C2B4; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #F7FBF8; }
+  button.primary:hover:not(:disabled) { background: #175841; border-color: #175841; }
+  button.ghost { background: transparent; box-shadow: none; }
+
+  .status { display: inline-flex; align-items: center; gap: var(--s2); font-size: .875rem; color: var(--ink-soft); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #B9B4A6; }
+  .dot.on { background: var(--accent); }
+  .dot.busy { background: #B07C1E; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--s5); margin-top: var(--s5); }
+  section { min-width: 0; }
+  h2 {
+    font-size: .75rem; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--ink-soft); font-weight: 650; margin: 0 0 var(--s3);
+  }
+
+  dl.facts { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: var(--s2) var(--s4); }
+  dl.facts dt { color: var(--ink-soft); font-size: .875rem; }
+  dl.facts dd { margin: 0; font-family: var(--mono); font-size: .875rem; word-break: break-all; }
+
+  .log {
+    font-family: var(--mono); font-size: .8125rem; line-height: 1.5;
+    background: #FFFDF8; border: 1px solid var(--rule); border-radius: var(--r2);
+    padding: var(--s3); height: 340px; overflow: auto; margin: 0;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .log .tx { color: var(--accent); }
+  .log .rx { color: var(--ink); }
+  .log .err { color: var(--danger); }
+  .log .note { color: var(--ink-soft); }
+
+  .empty { color: var(--ink-soft); font-size: .875rem; margin: 0; }
+  code { font-family: var(--mono); font-size: .8125rem; background: var(--accent-soft); padding: 1px 4px; border-radius: var(--r1); }
+
+  footer { margin-top: var(--s7); color: var(--ink-soft); font-size: .8125rem; }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Notra<span class="mark">.</span></h1>
+      <p class="sub">Direct BLE console — no vendor app, no cloud.</p>
+    </div>
+    <div class="status"><span class="dot" id="dot"></span><span id="state">disconnected</span></div>
+  </header>
+
+  <hr class="rule" />
+
+  <div class="bar">
+    <button class="primary" id="connect">Connect</button>
+    <button id="info" disabled>Read device</button>
+    <button id="ping" disabled>Heartbeat</button>
+    <button class="ghost" id="clear" disabled>Clear log</button>
+  </div>
+
+  <div class="grid">
+    <section>
+      <h2>Device</h2>
+      <dl class="facts">
+        <dt>name</dt><dd id="f-name">—</dd>
+        <dt>address</dt><dd id="f-addr">—</dd>
+        <dt>service</dt><dd id="f-svc">—</dd>
+        <dt>mtu</dt><dd id="f-mtu">—</dd>
+      </dl>
+    </section>
+    <section>
+      <h2>Info reply (TLV)</h2>
+      <dl class="facts" id="attrs"><dt>—</dt><dd>not read yet</dd></dl>
+    </section>
+  </div>
+
+  <div class="grid" style="margin-top: var(--s5)">
+    <section>
+      <h2>Mic gain</h2>
+      <div class="bar">
+        <input id="gain" type="number" min="0" max="30" step="1" value="24"
+               style="font: inherit; padding: 8px 12px; width: 90px; border: 1px solid var(--rule);
+                      border-radius: 8px; background: #FFFDF8; color: var(--ink);" />
+        <span class="status">dB</span>
+        <button id="applyGain" disabled>Apply</button>
+      </div>
+      <p class="empty" style="margin-top: var(--s2)">Attribute 0x04 on channel 0x001e (verified).</p>
+    </section>
+    <section>
+      <h2>Recording</h2>
+      <div class="bar">
+        <button id="activate" disabled>Activate</button>
+        <button id="pull" disabled>Pull latest</button>
+      </div>
+      <p class="empty" id="pullStatus" style="margin-top: var(--s2)">
+        Pulls whatever recording the device currently holds — no id needed. Record with the
+        device button first, then press Pull latest.
+      </p>
+    </section>
+  </div>
+
+  <section style="margin-top: var(--s5)">
+    <h2>Frames</h2>
+    <pre class="log" id="log"><span class="note">Idle. Click Connect — Chrome will list nearby BLE devices.</span></pre>
+    <p class="empty" id="hint" style="margin-top: var(--s2)">
+      Requires Chrome or Edge over <code>https://</code> or <code>localhost</code>. Windows and Android supported; Safari does not implement Web Bluetooth.
+    </p>
+  </section>
+
+  <footer>
+    Protocol recovered from the vendor SDK; see <code>research/PROTOCOL.md</code>. Interoperability tool for hardware I own.
+  </footer>
+</div>
+
+<script type="module">
+// ---------------------------------------------------------------- protocol --
+const SVC = "d8528400-66f0-40ff-8f3d-bc7a9853e04a";
+const CHR_WRITE = "d8528401-66f0-40ff-8f3d-bc7a9853e04a";
+const CHR_NOTIFY = "d8528402-66f0-40ff-8f3d-bc7a9853e04a";
+const APP = [0x01, 0x01, 0x1d, 0x00];
+const DEV = [0x01, 0x02, 0x25, 0x00];
+const CH_INFO = 0x0015;
+const CH_SN = 0x0017;
+const CH_NAME = 0x0018;
+const CH_CAPS = 0x0021;
+const CH_SETTINGS = 0x001e;
+const CH_FILE = 0x8007;
+const CH_FILE_CTL = 0x8008;
+const ATTR_MIC_GAIN = 0x04;
+const ATTR_FILE_ID = 0x11;
+const FLAG_STATUS = 0x10, FLAG_REQUEST = 0x12;
+const HB_PREFIX = [0x00, 0x60, 0x09, 0x00, 0x02, 0x0a];
+
+// CRC16 used by the device's attribute layer. Tables extracted from the vendor SDK
+// (libcfdlink.so @ 0x1a825 / 0x1a925); verified against device replies and app writes.
+const CRC_LO = new Uint8Array("00c1814001c0804101c0804100c1814001c0804100c1814000c1814001c0804101c0804100c1814000c1814001c0804100c1814001c0804101c0804100c1814001c0804100c1814000c1814001c0804100c1814001c0804101c0804100c1814000c1814001c0804101c0804100c1814001c0804100c1814000c1814001c0804101c0804100c1814000c1814001c0804100c1814001c0804101c0804100c1814000c1814001c0804101c0804100c1814001c0804100c1814000c1814001c0804100c1814001c0804101c0804100c1814001c0804100c1814000c1814001c0804101c0804100c1814000c1814001c0804100c1814001c0804101c0804100c18140".match(/../g).map((h) => parseInt(h, 16)));
+const CRC_HI = new Uint8Array("00c0c101c30302c2c60607c705c5c404cc0c0dcd0fcfce0e0acacb0bc90908c8d81819d91bdbda1a1ededf1fdd1d1cdc14d4d515d71716d6d21213d311d1d010f03031f133f3f23236f6f737f53534f43cfcfd3dff3f3efefa3a3bfb39f9f83828e8e929eb2b2aeaee2e2fef2dedec2ce42425e527e7e62622e2e323e12120e0a06061a163a3a26266a6a767a56564a46cacad6daf6f6eaeaa6a6bab69a9a86878b8b979bb7b7ababe7e7fbf7dbdbc7cb47475b577b7b67672b2b373b17170b0509091519353529296565797559594549c5c5d9d5f9f9e5e5a9a9b5b99595898884849894b8b8a4a4e8e8f4f8d4d4c8c44848545874746868242438341818040".match(/../g).map((h) => parseInt(h, 16)));
+
+function crc16(data) {
+  let c = 0;
+  for (const b of data) {
+    const i = (c ^ b) & 0xff;
+    c = ((c >> 8) ^ (CRC_HI[i] << 8) ^ CRC_LO[i]) & 0xffff;
+  }
+  return c;
+}
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+function zlibCrc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (const b of bytes) c = CRC32_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+const crcBytes = (data) => { const c = crc16(data); return [c & 0xff, (c >> 8) & 0xff]; };
+
+const u16 = (v) => [v & 0xff, (v >> 8) & 0xff];
+const sum8 = (arr) => arr.reduce((a, b) => (a + b) & 0xff, 0);
+
+function encodeFrame({ flags, msgId, src, dst, channel, payload = [] }) {
+  const body = [0x55, flags, ...u16(payload.length), ...u16(msgId), ...src, ...dst, ...u16(channel), ...payload];
+  body.push(sum8(body));
+  return new Uint8Array(body);
+}
+
+function decodeFrame(bytes) {
+  if (bytes.length < 17 || bytes[0] !== 0x55) throw new Error("bad start byte");
+  const len = bytes[2] | (bytes[3] << 8);
+  const total = 16 + len;
+  if (bytes.length < total + 1) throw new Error(`truncated (need ${total + 1}, have ${bytes.length})`);
+  let s = 0;
+  for (let i = 0; i < total; i++) s = (s + bytes[i]) & 0xff;
+  if (s !== bytes[total]) throw new Error("checksum mismatch");
+  return {
+    flags: bytes[1],
+    msgId: bytes[4] | (bytes[5] << 8),
+    src: Array.from(bytes.slice(6, 10)),
+    dst: Array.from(bytes.slice(10, 14)),
+    channel: bytes[14] | (bytes[15] << 8),
+    payload: Array.from(bytes.slice(16, total)),
+  };
+}
+
+function parseTLV(payload) {
+  const out = [];
+  let i = 0;
+  while (i + 2 <= payload.length) {
+    const attr = payload[i], len = payload[i + 1];
+    if (i + 2 + len > payload.length) break;
+    out.push([attr, payload.slice(i + 2, i + 2 + len)]);
+    i += 2 + len;
+  }
+  return out;
+}
+
+const hex = (a) => a.map((b) => b.toString(16).padStart(2, "0")).join(" ");
+const ascii = (a) => a.map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : ".")).join("");
+
+// ------------------------------------------------------------------ session --
+class Notra {
+  constructor(log) {
+    this.device = null; this.chr = null; this.log = log;
+    this.chanSeq = new Map(); this.hbId = 0x0015; this.hbCtr = 0xfc15;
+    this.buffer = new Uint8Array(0); this.listeners = new Set();
+  }
+  connected() { return !!(this.device && this.device.gatt && this.device.gatt.connected); }
+
+  async connect() {
+    this.device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "Boya" }, { namePrefix: "Notra" }],
+      optionalServices: [SVC],
+    });
+    this.device.addEventListener("gattserverdisconnected", () => this.emit("disconnected"));
+    const server = await this.device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    this.chr = await svc.getCharacteristic(CHR_WRITE);
+    const notify = await svc.getCharacteristic(CHR_NOTIFY);
+    await notify.startNotifications();
+    notify.addEventListener("characteristicvaluechanged", (e) => this.onData(e.target.value));
+    return this.device;
+  }
+
+  async disconnect() { if (this.device?.gatt?.connected) this.device.gatt.disconnect(); }
+
+  onData(view) {
+    const chunk = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    const merged = new Uint8Array(this.buffer.length + chunk.length);
+    merged.set(this.buffer); merged.set(chunk, this.buffer.length);
+    this.buffer = merged;
+    for (;;) {
+      const i = this.buffer.indexOf(0x55);
+      if (i < 0) { this.buffer = new Uint8Array(0); return; }
+      if (i > 0) this.buffer = this.buffer.slice(i);
+      if (this.buffer.length < 17) return;
+      const total = 16 + (this.buffer[2] | (this.buffer[3] << 8));
+      if (this.buffer.length < total + 1) return;
+      const candidate = this.buffer.slice(0, total + 1);
+      try {
+        const fr = decodeFrame(candidate);
+        this.buffer = this.buffer.slice(total + 1);
+        this.emit("frame", fr, candidate);
+      } catch {
+        this.buffer = this.buffer.slice(1);   // resync
+      }
+    }
+  }
+
+  nextId(channel) {
+    const n = ((this.chanSeq.get(channel) || 0) + 1) & 0xffff;
+    this.chanSeq.set(channel, n);
+    return n;
+  }
+
+  async send(frame) {
+    const bytes = encodeFrame(frame);
+    await this.chr.writeValueWithoutResponse(bytes);
+    this.emit("sent", { frame, bytes });
+  }
+
+  async heartbeat() {
+    const payload = [...HB_PREFIX, ...u16(this.hbCtr), 0, 0, 0, 0, 0x2c];
+    await this.send({ flags: FLAG_REQUEST, msgId: this.hbId, src: APP, dst: [0, 0, 0, 0], channel: 0, payload });
+    this.hbId = (this.hbId + 1) & 0xffff;
+    this.hbCtr = (this.hbCtr + 0x18) & 0xffff;
+  }
+
+  async getAttr(channel, timeout = 4000) {
+    await this.send({ flags: FLAG_STATUS, msgId: this.nextId(channel), src: APP, dst: DEV, channel, payload: [0, 0, 0] });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error("no reply")); }, timeout);
+      const h = (fr) => {
+        if (fr.channel !== channel || fr.flags !== 0x11) return;
+        clearTimeout(timer); this.listeners.delete(h);
+        const body = fr.payload.slice(0, -2);
+        resolve(body[0] === 0 ? body.slice(1) : body);
+      };
+      this.listeners.add(h);
+    });
+  }
+
+  async setAttr(attr, bytes) {
+    const tlv = [attr, bytes.length, ...bytes];
+    const payload = [...tlv, ...crcBytes(tlv)];
+    await this.send({ flags: FLAG_STATUS, msgId: this.nextId(CH_SETTINGS), src: APP, dst: DEV, channel: CH_SETTINGS, payload });
+  }
+
+  fileFrame(body) {
+    const crc32 = zlibCrc32(body);
+    const framed = [0xaa, crc32 & 0xff, (crc32 >>> 8) & 0xff, (crc32 >>> 16) & 0xff, (crc32 >>> 24) & 0xff, ...body];
+    return new Uint8Array([...framed, ...crcBytes(framed)]);
+  }
+
+  async activate() {
+    await this.setAttr(0x12, [0x01]);
+    await this.setAttr(0x0b, [0x01]);
+  }
+
+  async openLatest(timeout = 5000) {
+    await this.send({ flags: FLAG_STATUS, msgId: this.nextId(CH_FILE_CTL), src: APP, dst: DEV, channel: CH_FILE_CTL, payload: [0x80, 0x01, 0x00, 0x01] });
+    const key = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error("no pending recording — record something first")); }, timeout);
+      const h = (fr) => {
+        if (fr.channel !== CH_FILE_CTL || fr.flags !== 0x11) return;
+        const b = fr.payload.slice(0, -2);
+        if (b[0] !== 0x80 || b[1] !== 0x04) return;
+        clearTimeout(timer); this.listeners.delete(h);
+        resolve(b[2] | (b[3] << 8) | (b[4] << 16) | (b[5] << 24));
+      };
+      this.listeners.add(h);
+    });
+    const body = [0x81, 0x04, 0x00, key & 0xff, (key >>> 8) & 0xff, (key >>> 16) & 0xff, (key >>> 24) & 0xff];
+    await this.chr.writeValueWithoutResponse(this.fileFrame(body));
+    const meta = await this.awaitFrame(CH_FILE, 0x81, 5000);
+    const info = { key };
+    if (meta && meta.length >= 24) {
+      info.hash = [...meta.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      info.size = meta[16] | (meta[17] << 8) | (meta[18] << 16) | (meta[19] << 24);
+      info.chunks = meta[20] | (meta[21] << 8) | (meta[22] << 16) | (meta[23] << 24);
+    }
+    return info;
+  }
+
+  awaitFrame(channel, type, timeout = 5000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error("timeout")); }, timeout);
+      const h = (fr) => {
+        if (fr.channel !== channel || fr.flags !== 0x11) return;
+        const p = fr.payload;
+        if (p.length < 8 || p[0] !== 0xaa || p[5] !== type) return;
+        clearTimeout(timer); this.listeners.delete(h);
+        resolve(p.slice(6, -2));
+      };
+      this.listeners.add(h);
+    });
+  }
+
+  async pullLatest(onProgress) {
+    const info = await this.openLatest();
+    const out = [];
+    let offset = 0;
+    for (let guard = 0; guard < 800; guard++) {
+      const chunk = await this.requestChunk(info.key, offset);
+      out.push(chunk.data);
+      offset += chunk.data.length;
+      onProgress?.(offset, info.size);
+      if (chunk.data.length < 2090) break;
+    }
+    const total = out.reduce((n, p) => n + p.length, 0);
+    const bytes = new Uint8Array(total);
+    let at = 0;
+    for (const p of out) { bytes.set(p, at); at += p.length; }
+    await this.chr.writeValueWithoutResponse(this.fileFrame([0x84, 0x04, 0x00,
+      info.key & 0xff, (info.key >>> 8) & 0xff, (info.key >>> 16) & 0xff, (info.key >>> 24) & 0xff]));
+    return { bytes, info };
+  }
+
+  async fileKey(timeout = 4000) {
+    await this.send({ flags: FLAG_STATUS, msgId: this.nextId(CH_FILE_CTL), src: APP, dst: DEV, channel: CH_FILE_CTL, payload: [0x80, 0x01, 0x00, 0x01] });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error("device did not report a file key")); }, timeout);
+      const h = (fr) => {
+        if (fr.channel !== CH_FILE_CTL || fr.flags !== 0x11) return;
+        const body = fr.payload.slice(0, -2);
+        if (body[0] !== 0x80 || body[1] !== 0x04) return;
+        clearTimeout(timer); this.listeners.delete(h);
+        resolve(body[2] | (body[3] << 8) | (body[4] << 16) | (body[5] << 24));
+      };
+      this.listeners.add(h);
+    });
+  }
+
+  requestChunk(key, offset, timeout = 8000) {
+    const body = [0x82, 0x08, 0x00,
+      key & 0xff, (key >>> 8) & 0xff, (key >>> 16) & 0xff, (key >>> 24) & 0xff,
+      offset & 0xff, (offset >>> 8) & 0xff, (offset >>> 16) & 0xff, (offset >>> 24) & 0xff];
+    this.chr.writeValueWithoutResponse(this.fileFrame(body));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error(`no chunk at offset ${offset}`)); }, timeout);
+      const h = (fr) => {
+        if (fr.channel !== CH_FILE || fr.flags !== 0x11) return;
+        const pay = fr.payload;
+        if (pay.length < 20 || pay[0] !== 0xaa) return;
+        const off = pay[12] | (pay[13] << 8) | (pay[14] << 16) | (pay[15] << 24);
+        const len = pay[16] | (pay[17] << 8);
+        clearTimeout(timer); this.listeners.delete(h);
+        resolve({ offset: off, data: Uint8Array.from(pay.slice(18, 18 + len)) });
+      };
+      this.listeners.add(h);
+    });
+  }
+
+  async pullFile(id, onProgress) {
+    await this.setAttr(0x11, [...new TextEncoder().encode(id)]);
+    await new Promise((r) => setTimeout(r, 300));
+    const key = await this.fileKey();
+    const parts = [];
+    let offset = 0;
+    for (let guard = 0; guard < 500; guard++) {
+      const chunk = await this.requestChunk(key, offset);
+      if (chunk.offset !== offset) throw new Error(`offset mismatch: asked ${offset}, got ${chunk.offset}`);
+      parts.push(chunk.data);
+      offset += chunk.data.length;
+      onProgress?.(offset);
+      if (chunk.data.length < 2090) break;
+    }
+    const total = parts.reduce((n, p) => n + p.length, 0);
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const p of parts) { out.set(p, at); at += p.length; }
+    return out;
+  }
+
+  async getInfo() {
+    await this.send({ flags: FLAG_STATUS, msgId: this.nextId(CH_INFO), src: APP, dst: DEV, channel: CH_INFO, payload: [] });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.listeners.delete(handler); reject(new Error("no reply within 6 s")); }, 6000);
+      const handler = (fr) => {
+        if (fr.channel !== CH_INFO) return;
+        clearTimeout(timer); this.listeners.delete(handler);
+        resolve(fr);
+      };
+      this.listeners.add(handler);
+    });
+  }
+
+  emit(type, ...args) { for (const fn of this.listeners) fn(...args, type); }
+  on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+}
+
+// ---------------------------------------------------------------------- ui --
+const $ = (id) => document.getElementById(id);
+const logEl = $("log"), dot = $("dot"), stateEl = $("state");
+const btnConnect = $("connect"), btnInfo = $("info"), btnPing = $("ping"), btnClear = $("clear");
+
+function line(cls, text) {
+  const el = document.createElement("div");
+  el.className = cls; el.textContent = text;
+  logEl.appendChild(el); logEl.scrollTop = logEl.scrollHeight;
+}
+function setState(text, mode) {
+  stateEl.textContent = text;
+  dot.className = "dot" + (mode ? " " + mode : "");
+  const up = mode === "on";
+  btnConnect.textContent = up ? "Disconnect" : "Connect";
+  btnInfo.disabled = !up; btnPing.disabled = !up; btnClear.disabled = false;
+  if (typeof $ === "function") {
+    const g = document.getElementById("applyGain"), pl = document.getElementById("pull");
+    if (g) g.disabled = !up;
+    if (pl) pl.disabled = !up;
+    const act = document.getElementById("activate");
+    if (act) act.disabled = !up;
+  }
+}
+
+const client = new Notra();
+client.on((...args) => {
+  const type = args.pop();
+  if (type === "frame") {
+    const [fr, raw] = args;
+    line("rx", `<- id=${fr.msgId.toString(16).padStart(4, "0")} chan=${fr.channel.toString(16).padStart(4, "0")} len=${fr.payload.length}  ${hex(raw)}`);
+  } else if (type === "sent") {
+    const { frame, bytes } = args[0];
+    line("tx", `-> id=${frame.msgId.toString(16).padStart(4, "0")} chan=${frame.channel.toString(16).padStart(4, "0")} len=${frame.payload.length}  ${hex(bytes)}`);
+  } else if (type === "disconnected") {
+    setState("disconnected"); line("err", "device disconnected");
+  }
+});
+
+btnConnect.addEventListener("click", async () => {
+  if (client.connected()) { await client.disconnect(); setState("disconnected"); return; }
+  if (!navigator.bluetooth) { line("err", "Web Bluetooth unavailable — use Chrome/Edge on localhost or https"); return; }
+  try {
+    setState("looking…", "busy");
+    const dev = await client.connect();
+    $("f-name").textContent = dev.name || "(unnamed)";
+    $("f-addr").textContent = dev.id || "—";
+    $("f-svc").textContent = SVC.slice(0, 8) + "…";
+    $("f-mtu").textContent = "negotiated by the browser";
+    setState("connected", "on");
+    line("note", "connected — sending heartbeat");
+    await client.heartbeat();
+    try {
+      const name = await client.getAttr(CH_NAME);
+      const sn = await client.getAttr(CH_SN);
+      if (name) $("f-name").textContent = new TextDecoder().decode(name);
+      if (sn) $("f-addr").textContent = new TextDecoder().decode(sn);
+    } catch { /* optional */ }
+  } catch (err) {
+    setState("disconnected");
+    line("err", String(err?.message || err));
+  }
+});
+
+btnPing.addEventListener("click", async () => {
+  try { await client.heartbeat(); } catch (e) { line("err", String(e.message || e)); }
+});
+
+btnInfo.addEventListener("click", async () => {
+  try {
+    await client.heartbeat();
+    const fr = await client.getInfo();
+    const rows = $("attrs");
+    rows.innerHTML = "";
+    const items = parseTLV(fr.payload);
+    if (!items.length) { rows.innerHTML = "<dt>raw</dt><dd>" + hex(fr.payload) + "</dd>"; return; }
+    for (const [attr, val] of items) {
+      const dt = document.createElement("dt");
+      dt.textContent = "0x" + attr.toString(16).padStart(2, "0");
+      const dd = document.createElement("dd");
+      dd.textContent = val.length ? hex(val) + (ascii(val).includes("[^.]") ? "" : "") + "  " + ascii(val) : "(empty)";
+      rows.append(dt, dd);
+    }
+  } catch (e) {
+    line("err", String(e.message || e));
+  }
+});
+
+btnClear.addEventListener("click", () => { logEl.innerHTML = ""; });
+
+const gainEl = $("gain"), btnGain = $("applyGain");
+const btnPull = $("pull"), btnActivate = $("activate"), pullStatus = $("pullStatus");
+
+btnGain.addEventListener("click", async () => {
+  try {
+    const db = Number(gainEl.value);
+    await client.heartbeat();
+    await client.setAttr(0x04, [db & 0xff]);
+    line("note", `mic gain -> ${db} dB`);
+  } catch (e) { line("err", String(e.message || e)); }
+});
+
+btnActivate.addEventListener("click", async () => {
+  try { await client.heartbeat(); await client.activate(); line("note", "activated (attr 0x12=1, 0x0b=1)"); }
+  catch (e) { line("err", String(e.message || e)); }
+});
+
+btnPull.addEventListener("click", async () => {
+  btnPull.disabled = true;
+  pullStatus.textContent = "opening current recording…";
+  try {
+    await client.heartbeat();
+    const res = await client.pullLatest((n, size) => {
+      pullStatus.textContent = `${n.toLocaleString()} bytes received${size ? " of " + size.toLocaleString() : ""}…`;
+    });
+    const bytes = res.bytes;
+    const blob = new Blob([bytes], { type: "audio/ogg" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = url; a.download = `notra-${stamp}.ogg`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    pullStatus.textContent = `done — ${bytes.length.toLocaleString()} bytes (Ogg Opus)`;
+    line("note", `saved recording (${bytes.length} bytes), key ${res.info.key.toString(16)}`);
+  } catch (e) {
+    pullStatus.textContent = "failed";
+    line("err", String(e.message || e));
+  } finally { btnPull.disabled = false; }
+});
+setState("disconnected");
+</script>
+</body>
+</html>

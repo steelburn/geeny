@@ -1,0 +1,154 @@
+"""notra — CLI for the Boya Notra Neo (no vendor app required).
+
+Examples
+    python -m notra.cli scan
+    python -m notra.cli info
+    python -m notra.cli gain 18
+    python -m notra.cli raw 0401 18 --channel 0x1e
+    python -m notra.cli frames research/capture/ext4/.../btsnoop_hci.log
+    python -m notra.cli selftest research/capture/ext4/.../btsnoop_hci.log
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+
+from . import frame as F
+from .client import NotraClient
+from .transport import BleTransport, ReplayTransport
+
+
+def _transport(args):
+    if getattr(args, "replay", None):
+        return ReplayTransport(args.replay)
+    return BleTransport(getattr(args, "address", None), debug=args.debug)
+
+
+async def _cmd_scan(args) -> int:
+    from bleak import BleakScanner
+
+    print("scanning 10s ...")
+    found = await BleakScanner.discover(timeout=10.0, return_adv=True)
+    for addr, (dev, adv) in sorted(found.items(), key=lambda kv: kv[1][1].rssi, reverse=True):
+        name = adv.local_name or dev.name or ""
+        if name or "notra" in name.lower():
+            print(f"{addr}  rssi={adv.rssi:>4}  {name!r}")
+    return 0
+
+
+async def _cmd_info(args) -> int:
+    client = NotraClient(_transport(args), debug=args.debug)
+    await client.connect()
+    try:
+        await client.heartbeat()
+        info = await client.get_info()
+        print(info)
+    finally:
+        await client.close()
+    return 0
+
+
+async def _cmd_gain(args) -> int:
+    client = NotraClient(_transport(args), debug=args.debug)
+    await client.connect()
+    try:
+        await client.heartbeat()
+        await client.set_mic_gain(args.db)
+        print(f"mic gain -> {args.db} dB")
+    finally:
+        await client.close()
+    return 0
+
+
+async def _cmd_raw(args) -> int:
+    client = NotraClient(_transport(args), debug=True)
+    await client.connect()
+    try:
+        await client.raw(args.hex.replace(" ", ""), channel=int(args.channel, 0), flags=args.flags)
+        await asyncio.sleep(args.wait)
+    finally:
+        await client.close()
+    return 0
+
+
+def _cmd_frames(args) -> int:
+    t = ReplayTransport(args.path)
+    shown = 0
+    for data in t.iter_sync():
+        try:
+            fr = F.decode(data)
+        except ValueError as exc:
+            print(f"  !! {exc}: {data.hex()[:80]}")
+            continue
+        if args.verbose or shown < args.limit:
+            direction = "dev->app" if fr.dst == F.APP_NODE else "?->?"
+            print(f"{direction:9s} {fr}")
+        shown += 1
+    print(f"\n{shown} frames")
+    return 0
+
+
+def _cmd_selftest(args) -> int:
+    """Decode every frame in a capture; report valid vs incomplete (capture loss)."""
+    t = ReplayTransport(args.path)
+    ok = incomplete = 0
+    channels: dict[int, int] = {}
+    for data in t.iter_sync():
+        try:
+            fr = F.decode(data)
+        except ValueError as exc:
+            incomplete += 1
+            if args.verbose:
+                print(f"  incomplete: {exc}  ({len(data)} bytes)")
+            continue
+        ok += 1
+        channels[fr.channel] = channels.get(fr.channel, 0) + 1
+
+    print(f"frames decoded : {ok}")
+    print(f"incomplete     : {incomplete}  (dropped ACL fragments in the snoop log)")
+    print("channels       :", {f"0x{k:04x}": v for k, v in sorted(channels.items())})
+    return 0 if ok and channels else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="notra", description="Boya Notra Neo client")
+    p.add_argument("--address", help="BLE address (default: scan by name)")
+    p.add_argument("--debug", action="store_true", help="dump raw frames")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("scan", help="list nearby BLE devices").set_defaults(fn=lambda a: asyncio.run(_cmd_scan(a)))
+
+    for name, fn, hlp in (
+        ("info", _cmd_info, "read name/SN/firmware/battery"),
+        ("gain", _cmd_gain, "set mic gain in dB"),
+        ("raw", _cmd_raw, "send a raw payload"),
+    ):
+        sp = sub.add_parser(name, help=hlp)
+        sp.add_argument("--replay", help="replay a btsnoop instead of live BLE")
+        sp.set_defaults(fn=lambda a, f=fn: asyncio.run(f(a)))
+        if name == "gain":
+            sp.add_argument("db", type=int)
+        if name == "raw":
+            sp.add_argument("hex")
+            sp.add_argument("--channel", default="0x1e")
+            sp.add_argument("--flags", type=lambda s: int(s, 0), default=0x10)
+            sp.add_argument("--wait", type=float, default=3.0)
+
+    fp = sub.add_parser("frames", help="print frames from a capture")
+    fp.add_argument("path")
+    fp.add_argument("--limit", type=int, default=40)
+    fp.add_argument("--verbose", action="store_true")
+    fp.set_defaults(fn=_cmd_frames)
+
+    st = sub.add_parser("selftest", help="validate every frame in a capture")
+    st.add_argument("path")
+    st.add_argument("--verbose", action="store_true")
+    st.set_defaults(fn=_cmd_selftest)
+
+    args = p.parse_args(argv)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
