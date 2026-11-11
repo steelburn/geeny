@@ -85,6 +85,11 @@ whisper size (`tiny/base/small/medium`), a separate setting. `scripts/fetch_mode
 1.5B / 3B / 7B Qwen and a 3B Llama; any `.gguf` in `~/.cache/notra/models/` also shows up in
 the picker. CPU sweet spot: **3B**.
 
+The app's **Summary → On this machine** picker lists the whole catalog, not only what is
+installed: a model that is missing shows its size and downloads from the service (with a
+progress line) when tapped, then becomes selectable. The CLI path is still
+`scripts/fetch_model.py <name>`.
+
 Summaries come from the chosen local GGUF (`llama.cpp · qwen2.5-3b`) when present, then a
 local OpenAI-compatible server if one is running, and only then the extractive fallback —
 `GET /health` reports which. Set `NOTRA_LLM_MODEL` to use a different GGUF.
@@ -97,8 +102,10 @@ setup:
   `~/.cache/notra/models/` for summaries (or `extractive`, or the service default). Larger
   whisper sizes are slower but handle accents and code-switching better.
 - **External service** — any OpenAI-compatible API (OpenAI, Groq, LM Studio, llama.cpp):
-  base URL, API key, and the speech *or* summary model, chosen per half. Audio/transcripts
-  go there and are billed by it; the key lives in the app's preferences, not a system keystore.
+  base URL, API key, and the speech *or* summary model. The endpoint fields sit under the
+  half you switch to External, so Speech never shows a model field without them. Audio and
+  transcripts go there and are billed by it; the key lives in the app's preferences, not a
+  system keystore.
 
 There is **no local-service-URL field**. The app owns that address: it uses the built-in
 default `http://127.0.0.1:8765` (or `--dart-define=NOTRA_AI_URL=http://192.168.1.20:8765` at
@@ -114,6 +121,12 @@ chose an external service.
 the take as `<take>.ogg.notes.json` and restored on launch. Opening a take that already has a
 transcript reuses it, and a summary for the selected template is not regenerated. Only
 **Redo** forces transcription again; switching the template re-runs *just* the summary.
+
+**Summary shape is fixed by the template.** The model may rename or reorder sections; the
+service and the app both map the result onto the template's headings and order
+(`Overview` / `Decisions & actions` / `Key points`, `Overview` / `Key concepts` / `To review`
+or `Overview` / `Key points`) and strip list markers. Older sidecars render in that order too,
+so the same take looks the same across models.
 
 Each take shows its **length and size**, and once it has been transcribed, a generated
 **title** (editable — tap it in the notes sheet) with the filename underneath. Tapping a row

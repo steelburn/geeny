@@ -345,7 +345,9 @@ class _SetupPanel extends StatelessWidget {
       width: 420,
       child: SafeArea(
         child: AnimatedBuilder(
-          animation: session,
+          // The disclosure label is derived from AI settings too, so it must not
+          // wait for the next device event to refresh.
+          animation: Listenable.merge([session, session.takes.aiSettings]),
           builder: (context, _) => ListView(
             padding: const EdgeInsets.fromLTRB(Tokens.s4, Tokens.s4, Tokens.s4, Tokens.s5),
             children: [

@@ -421,3 +421,44 @@ closing/reopening the take, and force-stop + relaunch, produced **zero** new `/t
 `/summarize` calls (5/5 before and after) and the sidecar `.notes.json` was on disk. With the
 recorder connected, the status bar read `7.7 GB free` and Diagnostics
 `7.7 GB free of 7.7 GB` (battery 69 %, live). `flutter analyze` clean; 31 tests pass.
+
+---
+
+## 16. Follow-up fixes: endpoint fields, catalog downloads, summary shape (2026-11-11)
+
+1. **External endpoints appear with the half that needs them.** Previously Base URL + API key
+   were rendered once *after* the whole Summary block, so switching only Speech to External
+   showed a Speech model field with no URL or key. `_endpoints()` now renders inside
+   `_externalSpeech()` (when speech is external) or `_externalSummary()` (when only summary
+   is external); when both are external, Summary points back to the fields under Speech.
+2. **The Summary picker offers the whole catalog, not just installed files.** `/health` already
+   carried `summary_catalog`; the app now renders every entry — installed models selectable,
+   missing ones as `name · size GB` with a download icon. Tapping starts a download **on the
+   serving machine**:
+   - `notra/ai.py: download_model()` streams to `<file>.part` and renames on completion.
+   - `POST /models/download {"name": …}` starts it on a daemon thread; `GET
+     /models/download?name=…` returns `{state, received, total}`; `GET /models` lists the
+     catalog + states. `scripts/fetch_model.py` uses the same function.
+   - The app polls every 2 s, shows a progress bar/percentage, re-reads `/health`, and selects
+     the model when it lands. While a download runs, other downloads and Test are disabled.
+3. **Summary format is normalised.** `normalise_sections()` in `notra/ai.py` (and
+   `normaliseSections()` in `app/lib/ai/notes.dart`) map model output onto the template's
+   headings and order, accept aliases (`summary` → Overview, `Actions` → Decisions & actions,
+   `Takeaways` → Key points…), flatten strings/lists, strip `-`/`•`/numbering, and append
+   unknown non-empty sections at the end. Prompts now include the exact JSON shape. GGUF/LLM
+   output with no usable section returns `None`, so the extractive template takes over instead
+   of showing an empty/odd sheet. Old sidecars are re-ordered on read.
+4. **Panel loading state and live header.** The first `/health` call on opening Setup can race
+   the USB bridge; the panel now retries once, and says "Checking the local service…" instead
+   of the misleading "No GGUF yet" until a response lands. `_healthOk == false` explains that
+   summaries will be extractive until the service answers. The Transcription disclosure now
+   listens to `AiSettings` as well as `Session` (`Listenable.merge`), so
+   `external speech · local summary` updates immediately rather than waiting for the next
+   device event.
+
+Verified on the tablet: Speech → External showed Base URL + API key directly beneath the
+Speech model; Summary → On this machine listed `qwen2.5-3b · 1.9 GB`, `llama-3.2-3b · 2.0 GB`
+and `qwen2.5-7b · 4.7 GB`; tapping 3B downloaded it in ~15 s and the app selected it after
+`GET /health`. With 3B, the same 48 s take produced all three lecture sections in order
+(`Overview`, `Key concepts`, `To review`) and clean bullets; `/summarize` was called without
+`/transcribe` when switching template. `flutter analyze` clean; 34 tests pass.

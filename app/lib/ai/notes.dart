@@ -1,3 +1,90 @@
+/// Section order per template. Models return them in arbitrary order (and
+/// sometimes with different names); the app always reads and displays them in
+/// this order so two runs do not look like two different formats.
+const Map<String, List<String>> summaryTemplates = {
+  'meeting': ['Overview', 'Decisions & actions', 'Key points'],
+  'lecture': ['Overview', 'Key concepts', 'To review'],
+  'plain': ['Overview', 'Key points'],
+};
+
+/// Names a model uses for the canonical sections above.
+const Map<String, List<String>> _sectionAliases = {
+  'overview': ['summary', 'tldr', 'abstract', 'purpose', 'overview & context'],
+  'decisions & actions': [
+    'decisions',
+    'actions',
+    'action items',
+    'next steps',
+    'decisions and actions',
+    'decisions actions',
+  ],
+  'key points': ['points', 'highlights', 'takeaways', 'key takeaways', 'main points'],
+  'key concepts': ['concepts', 'key ideas', 'terms', 'definitions'],
+  'to review': ['review', 'follow up', 'follow ups', 'follow-ups', 'questions'],
+};
+
+String _sectionKey(String value) =>
+    value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+
+List<String> _bullets(dynamic value) {
+  final out = <String>[];
+  void add(dynamic v) {
+    if (v == null) return;
+    if (v is Map) {
+      for (final nested in v.values) {
+        add(nested);
+      }
+      return;
+    }
+    if (v is Iterable) {
+      for (final nested in v) {
+        add(nested);
+      }
+      return;
+    }
+    for (final line in v.toString().split(RegExp(r'[\r\n]+'))) {
+      var clean = line.trim();
+      clean = clean.replaceFirst(RegExp(r'^[-*•·]+\s*'), '');
+      clean = clean.replaceFirst(RegExp(r'^\d+[.)]\s*'), '');
+      clean = clean.trim();
+      if (clean.isNotEmpty) out.add(clean);
+    }
+  }
+
+  add(value);
+  return out;
+}
+
+/// Map a model's raw `sections` object onto the template's canonical headings,
+/// in template order, with plain bullet strings. Unknown sections are kept after
+/// the canonical ones rather than silently discarded.
+Map<String, List<String>> normaliseSections(Map<dynamic, dynamic> raw, String template) {
+  final order = summaryTemplates[template] ?? summaryTemplates['plain']!;
+  final canonical = {for (final name in order) _sectionKey(name): name};
+  final aliases = <String, String>{};
+  for (final entry in _sectionAliases.entries) {
+    final target = canonical[_sectionKey(entry.key)];
+    if (target == null) continue;
+    for (final alias in entry.value) {
+      aliases[_sectionKey(alias)] = target;
+    }
+  }
+
+  final out = {for (final name in order) name: <String>[]};
+  final extras = <String, List<String>>{};
+  for (final entry in raw.entries) {
+    final key = _sectionKey(entry.key.toString());
+    final target = canonical[key] ?? aliases[key];
+    final bullets = _bullets(entry.value);
+    if (target != null) {
+      out[target]!.addAll(bullets);
+    } else if (bullets.isNotEmpty) {
+      extras[entry.key.toString()] = bullets;
+    }
+  }
+  return {...out, ...extras};
+}
+
 /// Transcript + summary for one take.
 class TakeNotes {
   TakeNotes({
@@ -72,12 +159,12 @@ class TakeNotes {
         ],
       };
 
+  /// Summary sections in template order, with bullets trimmed. Works for old
+  /// sidecars too, so previously inconsistent output renders consistently.
   List<MapEntry<String, List<String>>> get summarySections {
-    final sections = (summary?['sections'] as Map?) ?? const {};
-    return [
-      for (final e in sections.entries)
-        MapEntry(e.key as String, [for (final b in (e.value as List? ?? const [])) b.toString()])
-    ];
+    final raw = (summary?['sections'] as Map?) ?? const {};
+    final normal = normaliseSections(raw, template);
+    return [for (final e in normal.entries) MapEntry(e.key, e.value)];
   }
 }
 

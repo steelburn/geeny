@@ -68,6 +68,51 @@ void main() {
     expect(AiSettings.shortModelName('llama-3.2-3b-instruct-q4_k_m'), 'llama-3.2-3b');
   });
 
+  test('model output is normalised to the template order and headings', () {
+    final result = normaliseSections({
+      'Key Points': ['- point one', '2. point two'],
+      'summary': 'This is the overview.',
+      'Actions': ['ship it'],
+      'Something Else': ['kept'],
+    }, 'meeting');
+
+    expect(result.keys.toList(),
+        ['Overview', 'Decisions & actions', 'Key points', 'Something Else']);
+    expect(result['Overview'], ['This is the overview.']);
+    expect(result['Decisions & actions'], ['ship it']);
+    expect(result['Key points'], ['point one', 'point two']);
+    expect(result['Something Else'], ['kept']);
+  });
+
+  test('lecture sections stay in their own order', () {
+    final result = normaliseSections({
+      'To Review': ['reread chapter 2'],
+      'key ideas': ['entropy'],
+      'Overview': ['a lecture'],
+    }, 'lecture');
+    expect(result.keys.toList(), ['Overview', 'Key concepts', 'To review']);
+    expect(result['Key concepts'], ['entropy']);
+    expect(result['To review'], ['reread chapter 2']);
+  });
+
+  test('old sidecars render in template order too', () {
+    final stored = TakeNotes(
+      path: '/tmp/take.ogg',
+      language: 'en',
+      duration: 1,
+      segments: [NoteSegment(0, 1, 'hello')],
+      summary: {
+        'sections': {
+          'Key points': ['b'],
+          'Overview': ['a'],
+        }
+      },
+    );
+    expect(stored.summarySections.map((e) => e.key).toList(),
+        ['Overview', 'Decisions & actions', 'Key points']);
+    expect(stored.summarySections.first.value, ['a']);
+  });
+
   test('notes round-trip through JSON so they survive a restart', () {
     final original = notes(summary: meetingSummary)
       ..engine = 'local · whisper small'
@@ -80,8 +125,8 @@ void main() {
     expect(restored.engine, original.engine);
     expect(restored.template, original.template);
     expect(restored.segments.single.speaker, 'Speaker 1');
-    expect(restored.summarySections.single.key, 'Overview');
-    expect(restored.summarySections.single.value, ['A real sentence from the take.']);
+    final overview = restored.summarySections.firstWhere((e) => e.key == 'Overview');
+    expect(overview.value, ['A real sentence from the take.']);
     expect(notesAction(notes: restored, template: 'meeting'), NotesAction.none);
   });
 }

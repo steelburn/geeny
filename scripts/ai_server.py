@@ -6,9 +6,13 @@ the pulled `.ogg` here, gets a transcript back, then asks for a summary.
     uv run --with faster-whisper --with soundfile --with numpy python scripts/ai_server.py
 
 Endpoints (port 8765):
-    GET  /health                 {"ok": true, "model": "...", "llm": bool}
+    GET  /health                 {"ok": true, "model": "...", "llm": bool, ...}
+    GET  /models                 summary-model catalog + download states
+    POST /models/download        body = {"name": "..."} -> background download
+    GET  /models/download?name=  {state, received, total}
     POST /transcribe             body = raw .ogg/.opus bytes -> transcript JSON
     POST /summarize              body = {"transcript": {...}, "template": "meeting"}
+    POST /title                  body = {"transcript": {...}} -> short title
 
 The tablet reaches it either over Wi-Fi or, for development, through
 `adb reverse tcp:8765 tcp:8765` (then the app uses http://127.0.0.1:8765).
@@ -32,6 +36,8 @@ MODELS = ("tiny", "base", "small", "medium")
 DEFAULT_MODEL = "base"
 _lock = threading.Lock()
 _models: dict[str, object] = {}   # whisper model size -> loaded WhisperModel
+_downloads: dict[str, dict] = {}  # catalog model name -> download state
+_downloads_lock = threading.Lock()
 
 
 def _speakers_available() -> bool:
@@ -50,6 +56,44 @@ def _get_model(size: str):
         model = WhisperModel(size, device="cpu", compute_type="int8")
         _models[size] = model
     return model
+
+
+def _download_worker(name: str) -> None:
+    def progress(done: int, total: int) -> None:
+        with _downloads_lock:
+            _downloads[name] = {
+                "state": "downloading",
+                "received": done,
+                "total": total,
+            }
+
+    try:
+        target = ai.download_model(name, progress=progress)
+        size = target.stat().st_size
+        with _downloads_lock:
+            _downloads[name] = {
+                "state": "done",
+                "received": size,
+                "total": size,
+                "path": str(target),
+            }
+    except Exception as exc:  # noqa: BLE001 - reported to the app
+        with _downloads_lock:
+            _downloads[name] = {
+                "state": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+
+def _download_state(name: str) -> dict:
+    with _downloads_lock:
+        state = dict(_downloads.get(name, {}))
+    if state:
+        return state
+    entry = ai.MODEL_CATALOG.get(name)
+    if entry and (ai.MODELS_DIR / str(entry["file"])).is_file():
+        return {"state": "done"}
+    return {"state": "idle"}
 
 
 def _transcribe_bytes(blob: bytes, model_size: str = DEFAULT_MODEL) -> ai.Transcript:
@@ -94,7 +138,20 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
 
     def do_GET(self):
-        if self.path.startswith("/health"):
+        if self.path.startswith("/models/download"):
+            from urllib.parse import urlparse, parse_qs
+
+            qs = parse_qs(urlparse(self.path).query)
+            name = (qs.get("name") or [""])[0]
+            if name not in ai.MODEL_CATALOG:
+                self._json(400, {"error": f"unknown model {name!r}"})
+                return
+            self._json(200, _download_state(name))
+        elif self.path.startswith("/models"):
+            with _downloads_lock:
+                downloads = {k: dict(v) for k, v in _downloads.items()}
+            self._json(200, {"models": ai.summary_catalog(), "downloads": downloads})
+        elif self.path.startswith("/health"):
             self._json(200, {
                 "ok": True,
                 "models": list(MODELS),
@@ -114,7 +171,29 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         blob = self.rfile.read(length) if length else b""
         try:
-            if self.path.startswith("/transcribe"):
+            if self.path == "/models/download":
+                req = json.loads(blob or b"{}")
+                name = str(req.get("name") or "")
+                entry = ai.MODEL_CATALOG.get(name)
+                if not entry:
+                    self._json(400, {"error": f"unknown model {name!r}"})
+                    return
+                target = ai.MODELS_DIR / str(entry["file"])
+                if target.is_file():
+                    self._json(200, _download_state(name))
+                    return
+                with _downloads_lock:
+                    current = dict(_downloads.get(name, {}))
+                if current.get("state") != "downloading":
+                    with _downloads_lock:
+                        _downloads[name] = {
+                            "state": "downloading",
+                            "received": 0,
+                            "total": 0,
+                        }
+                    threading.Thread(target=_download_worker, args=(name,), daemon=True).start()
+                self._json(200, _download_state(name))
+            elif self.path.startswith("/transcribe"):
                 from urllib.parse import urlparse, parse_qs
 
                 qs = parse_qs(urlparse(self.path).query)

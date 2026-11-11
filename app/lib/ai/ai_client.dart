@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import 'ai_settings.dart';
+import 'notes.dart';
 
 /// Client for transcription/summaries.
 ///
@@ -107,6 +108,35 @@ class AiClient {
     return null;
   }
 
+  /// Ask the local service to fetch a summary model from its catalog. The
+  /// download runs on the serving machine; poll [modelDownload] for progress.
+  Future<Map<String, dynamic>?> startModelDownload(String name) async {
+    try {
+      final r = await http
+          .post(_local('/models/download'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'name': name}))
+          .timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200) return null;
+      return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Progress of a catalog download: `state` is downloading / done / error.
+  Future<Map<String, dynamic>?> modelDownload(String name) async {
+    try {
+      final r = await http
+          .get(_local('/models/download', {'name': name}))
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return null;
+      return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>> transcribe(File audio,
       {Duration timeout = const Duration(minutes: 10)}) async {
     if (settings.speechExternal) return _transcribeExternal(audio, timeout);
@@ -171,13 +201,13 @@ class AiClient {
       return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
     }
 
-    final sections = switch (template) {
-      'lecture' => 'Overview, Key concepts, To review',
-      'plain' => 'Overview, Key points',
-      _ => 'Overview, Decisions & actions, Key points',
-    };
-    final prompt = 'Summarise this transcript. Reply with JSON only: one key per section '
-        '($sections), each holding a list of short bullet strings. Do not invent anything.\n\n'
+    final order = summaryTemplates[template] ?? summaryTemplates['plain']!;
+    final keys = order.map((k) => '"$k"').join(', ');
+    final prompt = 'Summarise this transcript.\n'
+        'Reply with JSON only, with exactly these keys in this order: $keys.\n'
+        'Each value is an array of short plain-text bullet strings drawn from the transcript. '
+        'Use the language of the transcript. No markdown, no numbering, no extra keys. '
+        'Do not invent anything.\n\nTRANSCRIPT:\n'
         '${(transcript['segments'] as List? ?? const []).map((s) => s['text']).join(' ')}';
     final r = await http
         .post(_external('/chat/completions'),
@@ -185,8 +215,9 @@ class AiClient {
             body: jsonEncode({
               'model': settings.externalSummary,
               'temperature': 0.2,
+              'max_tokens': 800,
               'messages': [
-                {'role': 'system', 'content': 'You write terse, factual notes.'},
+                {'role': 'system', 'content': 'You write terse, factual notes as compact JSON.'},
                 {'role': 'user', 'content': prompt},
               ],
             }))
@@ -196,10 +227,15 @@ class AiClient {
     final content = body['choices'][0]['message']['content'].toString();
     final match = RegExp(r'\{.*\}', dotAll: true).firstMatch(content);
     if (match == null) throw Exception('the model did not return JSON');
+    final raw = jsonDecode(match.group(0)!) as Map<String, dynamic>;
+    final sections = normaliseSections(raw, template);
+    if (sections.values.every((v) => v.isEmpty)) {
+      throw Exception('the model returned no summary sections');
+    }
     return {
       'template': template,
       'engine': 'external · ${settings.externalSummary}',
-      'sections': jsonDecode(match.group(0)!) as Map<String, dynamic>,
+      'sections': sections,
     };
   }
 

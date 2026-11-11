@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../ai/ai_settings.dart';
@@ -24,7 +26,14 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
   late final TextEditingController _extSummary;
   String? _status;
   bool _testing = false;
+  bool _healthLoaded = false;
+  bool _healthOk = false;
   List<String> _localLlms = const [];
+  List<Map<String, dynamic>> _catalog = const [];
+  Timer? _poll;
+  String? _downloading;
+  int _received = 0;
+  int _total = 0;
 
   @override
   void initState() {
@@ -37,15 +46,33 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
   }
 
   Future<void> _refreshHealth() async {
-    final h = await widget.takes.ai.health();
+    var h = await widget.takes.ai.health();
     if (!mounted) return;
+    if (h == null) {
+      // The first call can race the service/USB bridge as the panel opens.
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      if (!mounted) return;
+      h = await widget.takes.ai.health();
+      if (!mounted) return;
+    }
     setState(() {
-      _localLlms = [for (final m in (h?['local_llms'] as List? ?? const [])) m.toString()];
+      _healthLoaded = true;
+      _healthOk = h != null;
+      _applyHealth(h);
     });
+  }
+
+  void _applyHealth(Map<String, dynamic>? h) {
+    _localLlms = [for (final m in (h?['local_llms'] as List? ?? const [])) m.toString()];
+    _catalog = [
+      for (final m in (h?['summary_catalog'] as List? ?? const []))
+        if (m is Map) m.cast<String, dynamic>(),
+    ];
   }
 
   @override
   void dispose() {
+    _poll?.cancel();
     for (final c in [_extUrl, _key, _extSpeech, _extSummary]) {
       c.dispose();
     }
@@ -72,10 +99,83 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
     if (!mounted) return;
     setState(() {
       _testing = false;
-      _localLlms = [for (final m in (h?['local_llms'] as List? ?? const [])) m.toString()];
+      _healthLoaded = true;
+      _healthOk = h != null;
+      _applyHealth(h);
       _status = problem ?? 'Reachable — ${s.speechLabel}; ${s.summaryLabel}';
     });
   }
+
+  // --- catalog downloads ----------------------------------------------------
+
+  Future<void> _download(String name) async {
+    final ai = widget.takes.ai;
+    setState(() {
+      _downloading = name;
+      _received = 0;
+      _total = 0;
+      _status = null;
+    });
+    final started = await ai.startModelDownload(name);
+    if (!mounted) return;
+    if (started == null) {
+      setState(() {
+        _downloading = null;
+        _status = 'Could not start the download — is the local service running?';
+      });
+      return;
+    }
+    if (started['state'] == 'done') {
+      await _finishDownload(name);
+      return;
+    }
+    _poll?.cancel();
+    _poll = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      final state = await ai.modelDownload(name);
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final status = state?['state']?.toString();
+      setState(() {
+        _received = (state?['received'] as num?)?.toInt() ?? _received;
+        _total = (state?['total'] as num?)?.toInt() ?? _total;
+        if (status == 'error') {
+          _status = 'Download failed: ${state?['error'] ?? 'unknown error'}';
+        }
+      });
+      if (status == 'done' || status == 'error' || status == null) {
+        timer.cancel();
+        if (status == 'done') {
+          await _finishDownload(name);
+        } else if (mounted) {
+          setState(() => _downloading = null);
+        }
+      }
+    });
+  }
+
+  Future<void> _finishDownload(String name) async {
+    await _refreshHealth();
+    s.setLocalSummary(name);
+    if (!mounted) return;
+    setState(() {
+      _downloading = null;
+      _status = '${AiSettings.shortModelName(name)} is ready.';
+    });
+  }
+
+  String get _downloadLabel {
+    final name = _downloading;
+    if (name == null) return '';
+    final short = AiSettings.shortModelName(name);
+    if (_total > 0) {
+      return 'Downloading $short — ${(_received * 100 / _total).round()}%';
+    }
+    return 'Downloading $short — ${(_received / 1000000).toStringAsFixed(1)} MB';
+  }
+
+  // --- build ----------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -117,39 +217,11 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
         ),
         const SizedBox(height: Tokens.s2),
         if (!s.summaryExternal) ..._localSummary() else ..._externalSummary(),
-        if (s.usesExternal) ...[
-          const SizedBox(height: Tokens.s4),
-          const Divider(height: 1),
-          const SizedBox(height: Tokens.s4),
-          Text('External service', style: Tokens.section),
-          const SizedBox(height: Tokens.s2),
-          _Field(
-            label: 'Base URL',
-            controller: _extUrl,
-            hint: 'https://api.openai.com/v1',
-            onSubmitted: (_) => _save(),
-          ),
-          const SizedBox(height: Tokens.s2),
-          _Field(
-            label: 'API key',
-            controller: _key,
-            hint: 'sk-…',
-            obscure: true,
-            onSubmitted: (_) => _save(),
-          ),
-          const SizedBox(height: Tokens.s2),
-          Text(
-            'Used by whichever half is set to External. Audio and transcripts go to that '
-            'service and are billed by it. The key is kept in this app’s preferences, not a '
-            'system keystore.',
-            style: Tokens.caption.copyWith(color: Tokens.warn),
-          ),
-        ],
         const SizedBox(height: Tokens.s4),
         Row(
           children: [
             OutlinedButton(
-              onPressed: _testing ? null : _test,
+              onPressed: _testing || _downloading != null ? null : _test,
               child: _testing
                   ? const SizedBox(
                       width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
@@ -197,53 +269,116 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
         ),
       ];
 
-  List<Widget> _localSummary() => [
-        const SizedBox(height: Tokens.s1),
-        Text('On this machine, with llama.cpp', style: Tokens.body),
-        const SizedBox(height: Tokens.s1),
-        Wrap(
-          spacing: Tokens.s2,
-          runSpacing: Tokens.s2,
-          children: [
+  List<Widget> _localSummary() {
+    final catalogNames = {for (final c in _catalog) c['name'].toString()};
+    final installed = <String>{
+      for (final c in _catalog)
+        if (c['downloaded'] == true) c['name'].toString(),
+      ..._localLlms,
+    };
+    final extras = [for (final m in _localLlms) if (!catalogNames.contains(m)) m];
+    final canDownload = _catalog.any((c) => c['downloaded'] != true);
+
+    return [
+      const SizedBox(height: Tokens.s1),
+      Text('On this machine, with llama.cpp', style: Tokens.body),
+      const SizedBox(height: Tokens.s1),
+      Wrap(
+        spacing: Tokens.s2,
+        runSpacing: Tokens.s2,
+        children: [
+          ChoiceChipButton(
+            label: 'default',
+            selected: s.localSummary == 'auto',
+            onTap: () => setState(() {
+              s.setLocalSummary('auto');
+              _status = null;
+            }),
+          ),
+          for (final c in _catalog) _catalogChip(c),
+          for (final m in extras)
             ChoiceChipButton(
-              label: 'default',
-              selected: s.localSummary == 'auto',
+              label: _shortName(m),
+              selected: s.localSummary == m,
               onTap: () => setState(() {
-                s.setLocalSummary('auto');
+                s.setLocalSummary(m);
                 _status = null;
               }),
             ),
-            for (final m in _localLlms)
-              ChoiceChipButton(
-                label: _shortName(m),
-                selected: s.localSummary == m,
-                onTap: () => setState(() {
-                  s.setLocalSummary(m);
-                  _status = null;
-                }),
-              ),
-            ChoiceChipButton(
-              label: 'extractive',
-              selected: s.localSummary == 'extractive',
-              onTap: () => setState(() {
-                s.setLocalSummary('extractive');
-                _status = null;
-              }),
-            ),
-          ],
+          ChoiceChipButton(
+            label: 'extractive',
+            selected: s.localSummary == 'extractive',
+            onTap: () => setState(() {
+              s.setLocalSummary('extractive');
+              _status = null;
+            }),
+          ),
+        ],
+      ),
+      const SizedBox(height: Tokens.s1),
+      if (_downloading != null) ...[
+        const SizedBox(height: Tokens.s1),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(
+            value: _total > 0 ? _received / _total : null,
+            minHeight: 3,
+            backgroundColor: Tokens.rule,
+            color: Tokens.accent,
+          ),
         ),
         const SizedBox(height: Tokens.s1),
+        Text(_downloadLabel, style: Tokens.caption),
+      ] else if (!_healthLoaded)
+        Text('Checking the local service…', style: Tokens.caption)
+      else if (!_healthOk)
         Text(
-          _localLlms.isEmpty
-              ? 'No GGUF yet — run scripts/fetch_model.py (or drop a .gguf in '
-                  '~/.cache/notra/models/) and press Test connection. Without one, summaries '
-                  'are extractive.'
-              : 'More parameters write tighter notes but answer slower: 1.5B is quick, 3B is '
-                  'the CPU sweet spot, 7B is best when you can wait. Only the summary uses it; '
-                  'transcription accuracy comes from the whisper size above.',
+          'Local service not reachable — start scripts/ai_server.py, then press Test '
+          'connection. Until it answers, summaries fall back to extractive.',
+          style: Tokens.caption,
+        )
+      else
+        Text(
+          installed.isEmpty
+              ? 'No GGUF yet. Tap a model above to download it on the machine running the '
+                  'service (or run scripts/fetch_model.py), then press Test connection.'
+              : canDownload
+                  ? 'Tap a sized model to download it on the serving machine. More parameters '
+                      'write tighter notes but answer slower: 1.5B is quick, 3B is the CPU sweet '
+                      'spot, 7B is best when you can wait. Only the summary uses it; transcription '
+                      'accuracy comes from the whisper size above.'
+                  : 'More parameters write tighter notes but answer slower: 1.5B is quick, 3B is '
+                      'the CPU sweet spot, 7B is best when you can wait. Only the summary uses '
+                      'it; transcription accuracy comes from the whisper size above.',
           style: Tokens.caption,
         ),
-      ];
+    ];
+  }
+
+  Widget _catalogChip(Map<String, dynamic> entry) {
+    final name = entry['name'].toString();
+    final downloaded = entry['downloaded'] == true;
+    final size = entry['size_gb'];
+    final label = downloaded
+        ? _shortName(name)
+        : '${AiSettings.shortModelName(name)}${size is num ? ' · $size GB' : ''}';
+    if (downloaded) {
+      return ChoiceChipButton(
+        label: label,
+        selected: s.localSummary == name,
+        onTap: () => setState(() {
+          s.setLocalSummary(name);
+          _status = null;
+        }),
+      );
+    }
+    return ChoiceChipButton(
+      label: label,
+      selected: false,
+      icon: Icons.download,
+      onTap: _downloading == null ? () => _download(name) : null,
+    );
+  }
 
   List<Widget> _externalSpeech() => [
         const SizedBox(height: Tokens.s2),
@@ -253,6 +388,7 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
           hint: 'whisper-1',
           onSubmitted: (_) => _save(),
         ),
+        ..._endpoints(),
       ];
 
   List<Widget> _externalSummary() => [
@@ -262,6 +398,42 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
           controller: _extSummary,
           hint: 'gpt-4o-mini',
           onSubmitted: (_) => _save(),
+        ),
+        if (s.speechExternal) ...[
+          const SizedBox(height: Tokens.s2),
+          Text(
+            'Uses the external service configured under Speech (base URL and API key).',
+            style: Tokens.caption,
+          ),
+        ] else
+          ..._endpoints(),
+      ];
+
+  /// The shared OpenAI-compatible endpoint. Shown once, under the first half
+  /// that is set to External, so it is never buried below an unrelated section.
+  List<Widget> _endpoints() => [
+        const SizedBox(height: Tokens.s3),
+        Text('External service', style: Tokens.section),
+        const SizedBox(height: Tokens.s2),
+        _Field(
+          label: 'Base URL',
+          controller: _extUrl,
+          hint: 'https://api.openai.com/v1',
+          onSubmitted: (_) => _save(),
+        ),
+        const SizedBox(height: Tokens.s2),
+        _Field(
+          label: 'API key',
+          controller: _key,
+          hint: 'sk-…',
+          obscure: true,
+          onSubmitted: (_) => _save(),
+        ),
+        const SizedBox(height: Tokens.s2),
+        Text(
+          'Used by any half set to External. Audio and transcripts go to that service and are '
+          'billed by it. The key is kept in this app’s preferences, not a system keystore.',
+          style: Tokens.caption.copyWith(color: Tokens.warn),
         ),
       ];
 

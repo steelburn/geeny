@@ -55,6 +55,78 @@ ACTION_CUES = (
     "next step", "action", "by monday", "by friday", "remember", "todo", "to do",
 )
 
+# Long takes are trimmed before the summary prompt: llama.cpp runs with a 4k
+# context, and a transcript that overflows produces inconsistent JSON.
+MAX_SUMMARY_CHARS = 12000
+
+# Names models actually emit for the canonical template sections.
+SECTION_ALIASES: dict[str, list[str]] = {
+    "overview": ["summary", "tldr", "abstract", "purpose", "overview & context"],
+    "decisions & actions": ["decisions", "actions", "action items", "next steps",
+                            "decisions and actions", "decisions actions"],
+    "key points": ["points", "highlights", "takeaways", "key takeaways", "main points"],
+    "key concepts": ["concepts", "key ideas", "terms", "definitions"],
+    "to review": ["review", "follow up", "follow ups", "follow-ups", "questions"],
+}
+
+
+def _section_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
+
+def _bullets(value: object) -> list[str]:
+    """Plain bullet strings from whatever a model put in a section."""
+    out: list[str] = []
+
+    def add(item: object) -> None:
+        if item is None:
+            return
+        if isinstance(item, dict):
+            for nested in item.values():
+                add(nested)
+            return
+        if isinstance(item, (list, tuple, set)):
+            for nested in item:
+                add(nested)
+            return
+        for line in str(item).splitlines():
+            clean = line.strip()
+            clean = re.sub(r"^[-*•·]+\s*", "", clean)
+            clean = re.sub(r"^\d+[.)]\s*", "", clean)
+            clean = clean.strip()
+            if clean:
+                out.append(clean)
+
+    add(value)
+    return out
+
+
+def normalise_sections(data: object, template: str) -> dict[str, list[str]]:
+    """Map a model's output onto the template's headings, in template order."""
+    template = template if template in TEMPLATES else "plain"
+    order = list(TEMPLATES[template].keys())
+    canonical = {_section_key(name): name for name in order}
+    aliases: dict[str, str] = {}
+    for canonical_name, names in SECTION_ALIASES.items():
+        target = canonical.get(_section_key(canonical_name))
+        if target:
+            for alias in names:
+                aliases[_section_key(alias)] = target
+
+    out: dict[str, list[str]] = {name: [] for name in order}
+    extras: dict[str, list[str]] = {}
+    if isinstance(data, dict):
+        for raw_key, raw_value in data.items():
+            key = _section_key(raw_key)
+            target = canonical.get(key) or aliases.get(key)
+            bullets = _bullets(raw_value)
+            if target:
+                out[target].extend(bullets)
+            elif bullets:
+                extras[str(raw_key)] = bullets
+    out.update(extras)
+    return out
+
 
 @dataclass
 class Segment:
@@ -302,16 +374,18 @@ def summarize_llm(transcript: Transcript, template: str = "plain", endpoint: str
     if url is None:
         return None
     template = template if template in TEMPLATES else "plain"
-    topics = ", ".join(TEMPLATES[template].keys())
+    schema = json.dumps({name: [] for name in TEMPLATES[template]}, ensure_ascii=False)
     prompt = (
-        "Summarise this transcript. Reply as JSON with one key per section, each holding a "
-        f"list of short bullet strings. Sections: {topics}. Do not invent anything that is "
-        "not in the transcript.\n\nTRANSCRIPT:\n" + transcript.text
+        "Summarise the transcript. Reply with JSON only, no prose, using exactly this shape "
+        f"(same keys, same order): {schema}\n"
+        "Each value is a list of short plain-text bullet strings drawn from the transcript. "
+        "Use the language of the transcript. No markdown, no numbering.\n\nTRANSCRIPT:\n"
+        + transcript.text[:MAX_SUMMARY_CHARS]
     )
     body = json.dumps({
         "model": model or "local-model",
         "messages": [
-            {"role": "system", "content": "You write terse, factual meeting notes."},
+            {"role": "system", "content": "You write terse, factual notes as compact JSON."},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
@@ -322,7 +396,10 @@ def summarize_llm(transcript: Transcript, template: str = "plain", endpoint: str
             payload = json.loads(r.read())
         content = payload["choices"][0]["message"]["content"]
         data = json.loads(re.search(r"\{.*\}", content, re.S).group(0))
-        return {"template": template, "engine": "llm", "sections": data}
+        sections = normalise_sections(data, template)
+        if not any(sections.values()):
+            return None
+        return {"template": template, "engine": "llm", "sections": sections}
     except Exception:
         return None
 
@@ -355,6 +432,46 @@ def llm_model_path(name: str | None = None) -> pathlib.Path | None:
     return None
 
 
+def download_model(name: str, models_dir: pathlib.Path | str | None = None,
+                   progress=None, timeout: float = 120.0) -> pathlib.Path:
+    """Fetch a catalog GGUF into the models directory.
+
+    ``progress(done, total)`` is called after each 1 MB block; ``total`` is 0 when
+    the server does not send a Content-Length. Interrupted downloads leave no
+    partial file behind.
+    """
+    entry = MODEL_CATALOG.get(name)
+    if not entry:
+        raise KeyError(f"unknown model {name!r}")
+    target_dir = pathlib.Path(models_dir) if models_dir else MODELS_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / str(entry["file"])
+    if target.is_file() and target.stat().st_size > 0:
+        return target
+    url = model_download_url(name)
+    if url is None:
+        raise KeyError(f"no download URL for {name!r}")
+
+    part = target.with_name(target.name + ".part")
+    done = 0
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response, part.open("wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            while True:
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                out.write(block)
+                done += len(block)
+                if progress:
+                    progress(done, total)
+        part.replace(target)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def _gguf_llm(name: str | None = None):
     path = llm_model_path(name)
     if path is None:
@@ -382,12 +499,13 @@ def summarize_gguf(transcript: Transcript, template: str = "plain", model_name: 
     if model is None:
         return None
     template = template if template in TEMPLATES else "plain"
-    topics = ", ".join(TEMPLATES[template].keys())
+    schema = json.dumps({name: [] for name in TEMPLATES[template]}, ensure_ascii=False)
     prompt = (
-        f"Summarise the transcript into JSON with exactly these keys: {topics}. "
-        "Each key maps to a list of short bullet strings drawn from the transcript. "
-        "Keep the language of the transcript. Reply with JSON only, no prose.\n\nTRANSCRIPT:\n"
-        + transcript.text
+        "Summarise the transcript. Reply with JSON only, no prose, using exactly this shape "
+        f"(same keys, same order): {schema}\n"
+        "Each value is a list of short plain-text bullet strings drawn from the transcript. "
+        "Use the language of the transcript. No markdown, no numbering.\n\nTRANSCRIPT:\n"
+        + transcript.text[:MAX_SUMMARY_CHARS]
     )
     try:
         out = model.create_chat_completion(
@@ -404,8 +522,9 @@ def summarize_gguf(transcript: Transcript, template: str = "plain", model_name: 
         if not match:
             return None
         data = json.loads(match.group(0))
-        sections = {k: (v if isinstance(v, list) else [str(v)]) for k, v in data.items()
-                    if isinstance(v, (list, str))}
+        sections = normalise_sections(data, template)
+        if not any(sections.values()):
+            return None
         return {
             "template": template,
             "engine": f"llama.cpp · {llm_model_path(model_name).stem}",  # type: ignore[union-attr]

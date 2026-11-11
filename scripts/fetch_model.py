@@ -71,37 +71,31 @@ def _download(name: str, models_dir: Path, force: bool) -> int:
     if target.is_file() and not force:
         print(f"already there: {target} ({_human(target.stat().st_size)})")
         return 0
+    if force:
+        target.unlink(missing_ok=True)
 
-    part = target.with_suffix(target.suffix + ".part")
     print(f"→ {url}\n  to {target}")
     started = time.time()
+    last = 0.0
+
+    def progress(done: int, total: int) -> None:
+        nonlocal last
+        now = time.time()
+        if now - last <= 0.5:
+            return
+        last = now
+        pct = f"{done * 100 / total:5.1f}%" if total else ""
+        print(f"\r  {_human(done):>10} {pct}", end="", flush=True)
+
     try:
-        with urllib.request.urlopen(url) as resp, part.open("wb") as out:
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            last = 0.0
-            while True:
-                block = resp.read(1024 * 256)
-                if not block:
-                    break
-                out.write(block)
-                done += len(block)
-                now = time.time()
-                if now - last > 0.5:
-                    last = now
-                    pct = f"{done * 100 / total:5.1f}%" if total else ""
-                    print(f"\r  {_human(done):>10} {pct}", end="", flush=True)
-        part.replace(target)
-    except urllib.error.HTTPError as exc:
-        part.unlink(missing_ok=True)
-        print(f"\ndownload failed: HTTP {exc.code} {exc.reason}", file=sys.stderr)
-        return 1
+        ai.download_model(name, models_dir=models_dir, progress=progress)
     except KeyboardInterrupt:
-        part.unlink(missing_ok=True)
         print("\ninterrupted — partial file removed", file=sys.stderr)
         return 130
-    except OSError as exc:
-        part.unlink(missing_ok=True)
+    except urllib.error.HTTPError as exc:
+        print(f"\ndownload failed: HTTP {exc.code} {exc.reason}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - surface a helpful message
         print(f"\ndownload failed: {exc}", file=sys.stderr)
         return 1
 
