@@ -27,6 +27,13 @@ class TakesSection extends StatelessWidget {
               children: [
                 Text('Takes', style: Tokens.section),
                 const Spacer(),
+                TextButton.icon(
+                  onPressed: takes.importing ? null : () => _openImport(context, takes),
+                  icon: Icon(takes.importing ? Icons.hourglass_empty : Icons.file_download_outlined,
+                      size: 16),
+                  label: Text(takes.importing ? 'Importing…' : 'Import'),
+                ),
+                const SizedBox(width: Tokens.s2),
                 Text(items.length == takes.items.length
                     ? '${items.length} saved'
                     : '${items.length} of ${takes.items.length}',
@@ -35,6 +42,32 @@ class TakesSection extends StatelessWidget {
             ),
             const SizedBox(height: Tokens.s1),
             const Divider(height: 1),
+            if (takes.notice != null)
+              Padding(
+                padding: const EdgeInsets.only(top: Tokens.s2),
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(Tokens.s3, Tokens.s2, Tokens.s1, Tokens.s2),
+                  decoration: BoxDecoration(
+                    color: Tokens.accentSoft,
+                    borderRadius: BorderRadius.circular(Tokens.r2),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(top: 2),
+                        child: Icon(Icons.check_circle_outline, size: 16, color: Tokens.accent),
+                      ),
+                      const SizedBox(width: Tokens.s2),
+                      Expanded(child: Text(takes.notice!, style: Tokens.bodySmall)),
+                      TextButton(
+                        onPressed: takes.dismissNotice,
+                        child: const Text('Dismiss'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             if (takes.projects.isNotEmpty || takes.unfiledCount > 0) ...[
               const SizedBox(height: Tokens.s2),
               Wrap(
@@ -115,12 +148,129 @@ class _EmptyTakes extends StatelessWidget {
           child: Text(
             filter == 'unfiled'
                 ? 'Every take has a project. Switch back to All to see them together.'
-                : 'No takes yet. Record with the device, fetch it here, and it will show up '
-                    'with a title once it has been transcribed.',
+                : 'No takes yet. Record with the device and fetch it here, or import a '
+                    'recording or transcript you exported from Boya OS. A take shows its '
+                    'title once it has been transcribed.',
             style: Tokens.bodySmall,
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Import: the share sheet, or a file exported to Downloads.
+///
+/// Boya OS has no import API — its recordings live in its cloud — so the honest
+/// path is the one that app already offers: Share, and its Export menu.
+Future<void> _openImport(BuildContext context, Takes takes) async {
+  final pick = await showModalBottomSheet<bool>(
+    context: context,
+    backgroundColor: Tokens.surface,
+    elevation: 0,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(Tokens.r2)),
+    ),
+    builder: (ctx) => SheetSurface(
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(Tokens.s5, Tokens.s4, Tokens.s5, Tokens.s4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text('Import from Boya OS', style: Tokens.title),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    constraints: const BoxConstraints(
+                      minWidth: Tokens.target,
+                      minHeight: Tokens.target,
+                    ),
+                    icon: const Icon(Icons.close, size: 20, color: Tokens.inkSoft),
+                    tooltip: 'Close',
+                  ),
+                ],
+              ),
+              const SizedBox(height: Tokens.s2),
+              Text(
+                'Boya OS keeps its recordings in its own account, so Geeny cannot read them '
+                'directly. It does accept what that app can export:',
+                style: Tokens.bodySmall,
+              ),
+              const SizedBox(height: Tokens.s3),
+              const _ImportStep(
+                step: '1',
+                title: 'Recording',
+                detail: 'In Boya OS choose Share \u2192 Geeny, or Export audio and pick the file '
+                    'below. Ogg Opus transcribes on your machine; MP3 and M4A play here but '
+                    'need an external speech service.',
+              ),
+              const SizedBox(height: Tokens.s3),
+              const _ImportStep(
+                step: '2',
+                title: 'Transcript and summary',
+                detail: 'Export as TXT, Markdown or SRT and share it. It is attached to the '
+                    'take with the same name, or kept as a transcript-only take. DOCX and PDF '
+                    'are not readable here.',
+              ),
+              const SizedBox(height: Tokens.s4),
+              Row(
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    icon: const Icon(Icons.folder_open, size: 18),
+                    label: const Text('Choose a file'),
+                  ),
+                  const SizedBox(width: Tokens.s3),
+                  Expanded(
+                    child: Text(
+                      'Sharing from another app sends the file straight here.',
+                      style: Tokens.caption,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: Tokens.s2),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  if (pick == true && context.mounted) {
+    await takes.importFromPicker();
+  }
+}
+
+class _ImportStep extends StatelessWidget {
+  const _ImportStep({required this.step, required this.title, required this.detail});
+  final String step;
+  final String title;
+  final String detail;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 22,
+          child: Text(step, style: Tokens.dataSmall.copyWith(color: Tokens.accent)),
+        ),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: Tokens.body.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 1),
+              Text(detail, style: Tokens.bodySmall),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -163,15 +313,18 @@ class _TakeRow extends StatelessWidget {
           child: Row(
             children: [
               IconButton(
-                onPressed: onPressed,
+                onPressed: take.hasAudio ? onPressed : null,
                 iconSize: 20,
-                tooltip: playing ? 'Pause' : 'Play',
+                tooltip: take.hasAudio
+                    ? (playing ? 'Pause' : 'Play')
+                    : 'Transcript only — the audio stayed in Boya OS',
                 constraints: const BoxConstraints(
                   minWidth: Tokens.target,
                   minHeight: Tokens.target,
                 ),
                 style: IconButton.styleFrom(
                   foregroundColor: active ? Tokens.accent : Tokens.ink,
+                  disabledForegroundColor: Tokens.inkSoft.withValues(alpha: 0.5),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(Tokens.r1),
                     side: const BorderSide(color: Tokens.ruleStrong),
@@ -248,12 +401,13 @@ Future<void> _rowActions(BuildContext context, Takes takes, Take take) async {
               child: Text('${title ?? take.humanDate}  ·  ${take.meta}',
                   style: Tokens.dataSmall),
             ),
-            ListTile(
-              minVerticalPadding: Tokens.s3,
-              leading: Icon(playing ? Icons.pause : Icons.play_arrow, color: Tokens.ink),
-              title: Text(playing ? 'Pause' : 'Play', style: Tokens.body),
-              onTap: () => Navigator.of(ctx).pop('play'),
-            ),
+            if (take.hasAudio)
+              ListTile(
+                minVerticalPadding: Tokens.s3,
+                leading: Icon(playing ? Icons.pause : Icons.play_arrow, color: Tokens.ink),
+                title: Text(playing ? 'Pause' : 'Play', style: Tokens.body),
+                onTap: () => Navigator.of(ctx).pop('play'),
+              ),
             ListTile(
               minVerticalPadding: Tokens.s3,
               leading: Icon(takes.notes.containsKey(take.file.path) ? Icons.notes : Icons.article_outlined,

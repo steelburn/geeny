@@ -8,11 +8,21 @@ the pulled `.ogg` here, gets a transcript back, then asks for a summary.
 Endpoints (port 8765):
     GET  /health                 {"ok": true, "model": "...", "llm": bool, ...}
     GET  /models                 summary-model catalog + download states
+    GET  /models/storage         downloaded models on disk, with sizes
     POST /models/download        body = {"name": "..."} -> background download
     GET  /models/download?name=  {state, received, total}
+    POST /models/delete          body = {"kind": "summary|speech|partial", "name": "..."}
     POST /transcribe             body = raw .ogg/.opus bytes -> transcript JSON
     POST /summarize              body = {"transcript": {...}, "template": "meeting"}
     POST /title                  body = {"transcript": {...}} -> short title
+    POST /index                  body = {"documents": [...]} -> rebuild the search index
+    GET  /index                  what the index holds
+    POST /search                 body = {"query": "..."} -> ranked passages
+    GET  /search?q=...           same, for curl
+    POST /chat                   body = {"question": "..."} -> answer + cited passages
+
+The search index lives in memory and is rebuilt from what the app (or the CLI) pushes,
+so transcripts never have to leave the machine they are already on.
 
 The tablet reaches it either over Wi-Fi or, for development, through
 `adb reverse tcp:8765 tcp:8765` (then the app uses http://127.0.0.1:8765).
@@ -29,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from notra import ai  # noqa: E402
+from notra import ai, search  # noqa: E402
 
 PORT = 8765
 MODELS = ("tiny", "base", "small", "medium")
@@ -39,23 +49,43 @@ _models: dict[str, object] = {}   # whisper model size -> loaded WhisperModel
 _downloads: dict[str, dict] = {}  # catalog model name -> download state
 _downloads_lock = threading.Lock()
 
+# Importing the diarizer pulls in torch, which can take seconds on first use. That
+# must not happen inside a /health reply, or every probe of the panel times out.
+_speakers_cache: bool | None = None
+
+# Passages pushed by the app; rebuilt whenever the app's notes change.
+_index = search.Index()
+_index_lock = threading.RLock()
+
 
 def _speakers_available() -> bool:
-    try:
-        from notra import diarize
-        return diarize.available()
-    except Exception:
-        return False
+    global _speakers_cache
+    if _speakers_cache is None:
+        try:
+            from notra import diarize
+            _speakers_cache = diarize.available()
+        except Exception:
+            _speakers_cache = False
+    return _speakers_cache
+
+
+def _speakers_reported() -> bool:
+    """What /health says: never waits for torch to import.
+
+    The warm-up thread fills the cache; until then the honest answer is "no".
+    """
+    return bool(_speakers_cache)
 
 
 def _get_model(size: str):
     size = size if size in MODELS else DEFAULT_MODEL
-    model = _models.get(size)
-    if model is None:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(size, device="cpu", compute_type="int8")
-        _models[size] = model
-    return model
+    with _lock:
+        model = _models.get(size)
+        if model is None:
+            from faster_whisper import WhisperModel
+            model = WhisperModel(size, device="cpu", compute_type="int8")
+            _models[size] = model
+        return model
 
 
 def _download_worker(name: str) -> None:
@@ -94,6 +124,29 @@ def _download_state(name: str) -> dict:
     if entry and (ai.MODELS_DIR / str(entry["file"])).is_file():
         return {"state": "done"}
     return {"state": "idle"}
+
+
+def _int(value: object, default: int) -> int:
+    try:
+        return max(1, min(50, int(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _index_state() -> dict:
+    with _index_lock:
+        return {
+            "documents": _index.document_count,
+            "passages": len(_index),
+            "at": _index.at,
+        }
+
+
+def _do_search(query: str, limit: int) -> dict:
+    with _index_lock:
+        hits = _index.search(query, limit)
+        documents = _index.document_count
+    return {"query": query, "hits": hits, "documents": documents}
 
 
 def _transcribe_bytes(blob: bytes, model_size: str = DEFAULT_MODEL) -> ai.Transcript:
@@ -138,6 +191,7 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
 
     def do_GET(self):
+
         if self.path.startswith("/models/download"):
             from urllib.parse import urlparse, parse_qs
 
@@ -147,22 +201,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": f"unknown model {name!r}"})
                 return
             self._json(200, _download_state(name))
+        elif self.path.startswith("/models/storage"):
+            self._json(200, ai.model_storage())
         elif self.path.startswith("/models"):
             with _downloads_lock:
                 downloads = {k: dict(v) for k, v in _downloads.items()}
             self._json(200, {"models": ai.summary_catalog(), "downloads": downloads})
+        elif self.path.startswith("/index"):
+            with _index_lock:
+                self._json(200, _index_state())
+        elif self.path.startswith("/search"):
+            from urllib.parse import urlparse, parse_qs
+
+            qs = parse_qs(urlparse(self.path).query)
+            query = (qs.get("q") or qs.get("query") or [""])[0]
+            limit = _int((qs.get("limit") or ["12"])[0], 12)
+            self._json(200, _do_search(query, limit))
         elif self.path.startswith("/health"):
             self._json(200, {
                 "ok": True,
                 "models": list(MODELS),
                 "loaded": sorted(_models),
                 "default_model": DEFAULT_MODEL,
-                "llm": ai._llm_available() or None,
+                "llm": ai.llm_available_cached() or None,
                 "local_llm": (ai.llm_model_path().name if ai.llm_model_path() else None),
                 "local_llms": ai.available_llms(),
                 "default_llm": ai.DEFAULT_LLM_NAME,
                 "summary_catalog": ai.summary_catalog(),
-                "speakers": _speakers_available(),
+                "speakers": _speakers_reported(),
+                "whisper_cached": [label for label, _ in ai.whisper_cache_dirs()],
+                "index": _index_state(),
             })
         else:
             self._json(404, {"error": "not found"})
@@ -193,6 +261,68 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     threading.Thread(target=_download_worker, args=(name,), daemon=True).start()
                 self._json(200, _download_state(name))
+            elif self.path == "/models/delete":
+                req = json.loads(blob or b"{}")
+                kind = str(req.get("kind") or "summary")
+                name = str(req.get("name") or "")
+                with _downloads_lock:
+                    busy = any(
+                        state.get("state") == "downloading" and n == name
+                        for n, state in _downloads.items()
+                    )
+                if busy:
+                    self._json(409, {"error": "that model is still downloading"})
+                    return
+                try:
+                    # Unload before unlinking: Windows keeps a handle on a loaded GGUF,
+                    # and a whisper model would reload from a directory we just removed.
+                    with ai._LLM_LOCK:
+                        if kind == "summary":
+                            ai._GGUF.pop(name, None)
+                        elif kind == "speech":
+                            with _lock:
+                                _models.pop(name, None)
+                        if kind in ("summary", "speech"):
+                            import gc
+                            gc.collect()
+                    freed = ai.delete_model(kind, name)
+                except (KeyError, ValueError) as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                except FileNotFoundError as exc:
+                    self._json(404, {"error": str(exc)})
+                    return
+                except OSError as exc:
+                    self._json(409, {"error": f"could not delete: {exc}"})
+                    return
+                self._json(200, {"freed": freed, "storage": ai.model_storage()})
+            elif self.path == "/index":
+                req = json.loads(blob or b"{}")
+                documents = req.get("documents")
+                if not isinstance(documents, list):
+                    self._json(400, {"error": "expected {\"documents\": [...]}"})
+                    return
+                with _index_lock:
+                    _index.replace(documents)
+                    state = _index_state()
+                self._json(200, state)
+            elif self.path == "/search":
+                req = json.loads(blob or b"{}")
+                query = str(req.get("query") or "")
+                self._json(200, _do_search(query, _int(req.get("limit"), 12)))
+            elif self.path == "/chat":
+                req = json.loads(blob or b"{}")
+                question = str(req.get("question") or "").strip()
+                if not question:
+                    self._json(400, {"error": "expected {\"question\": \"...\"}"})
+                    return
+                with _index_lock:
+                    hits = _index.search(question, _int(req.get("limit"), 6))
+                model_name = req.get("summary_model")
+                model_name = None if model_name in (None, "", "auto", "extractive") else str(model_name)
+                result = search.build_answer(question, hits, model_name=model_name)
+                result["question"] = question
+                self._json(200, result)
             elif self.path.startswith("/transcribe"):
                 from urllib.parse import urlparse, parse_qs
 
@@ -241,9 +371,38 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
 
 
+def _already_running() -> bool:
+    """True when another service answers on this port.
+
+    Two services on one port silently split the app's requests between them — one
+    process gets the index, another gets the question — and each loads its own copy
+    of the model. Refusing to start twice is the honest behaviour.
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=4.0) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
 def main() -> int:
+    if _already_running():
+        print(f"a Geeny AI service is already answering on :{PORT} — using that one", flush=True)
+        return 0
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     llm = ai.llm_model_path()
+    # Warm the diarizer check once the first probes are done: importing torch takes
+    # seconds and /health is polled, so it must not happen on the request path.
+    warm = threading.Timer(8.0, _speakers_available)
+    warm.daemon = True
+    warm.start()
+    # Same for the "is an OpenAI-compatible server running?" probe.
+    probe = threading.Timer(1.0, ai._llm_available)
+    probe.daemon = True
+    probe.start()
     print(f"notra ai service on :{PORT} (whisper: {', '.join(MODELS)}; default {DEFAULT_MODEL})", flush=True)
     print(f"summaries: {'llama.cpp · ' + llm.name if llm else 'extractive (no GGUF found)'}", flush=True)
     try:

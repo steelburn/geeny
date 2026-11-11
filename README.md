@@ -157,6 +157,66 @@ Summaries are extractive by default — real sentences from the transcript, rank
 invented. If a local OpenAI-compatible server is running (LM Studio on :1234, Ollama on
 :11434, llama.cpp on :8080) the same call produces an abstractive summary instead.
 
+## Search and ask across your takes
+
+Once a take has a transcript, its text is searchable — and askable. The magnifier in the
+header opens one sheet with two modes:
+
+- **Search** — BM25 over every transcript line and every summary bullet, with the take's
+title, project and date indexed too. A hit shows the take, the timestamp and the passage;
+tapping it opens the transcript at that moment (loaded, not playing).
+- **Ask** — a question is answered by the same local GGUF that writes the summaries, using
+only the six best-matching passages, with `[n]` citations back to the take and timestamp.
+No model installed? The matching passages themselves are shown and labelled *extractive* —
+nothing is invented either way.
+
+The app pushes the text it already has (transcripts + summaries) to the service, which keeps
+an in-memory index; the audio never leaves the device and neither does the text. Search is
+purely local, so it also works when both AI halves are routed externally — but not when the
+service is down.
+
+```bash
+python -m notra find "sampling plan" --library path/to/takes
+python -m notra ask  "who owns the sampling plan?" --library path/to/takes
+```
+
+`<take>.ogg.notes.json` sidecars plus `library.json` are all the CLI needs, so a PC library
+is searchable without the app.
+
+## Import from Boya OS (and anywhere else)
+
+Boya OS keeps recordings in its own account; there is no import API and no local file to
+steal. What it does have is **Share** and **Export** — so Geeny registers as an Android
+share target for audio and for transcript files:
+
+1. In Boya OS: **Share → Geeny** for a recording, or **Export audio** and pick the file.
+   Ogg Opus transcribes locally; MP3/M4A play here but need an external speech service.
+2. **Export transcript** as TXT, Markdown or SRT (DOCX and PDF are not readable) and share
+   that too. It is attached to the take with the same name, or kept as a *transcript-only*
+   take when the audio stayed in the cloud — searchable, readable and exportable, just not
+   playable.
+
+The takes header has **Import → Choose a file** for exports that ended up in Downloads.
+Everything lands in the app's own library; nothing is uploaded.
+
+## Housekeeping — models on the serving machine
+
+Setup → **Models on this machine** lists every download with its size and one delete button:
+
+- summary GGUFs (`~/.cache/notra/models/`)
+- whisper weights (`~/.cache/huggingface/hub/models--Systran--faster-whisper-*`)
+- interrupted `.part` downloads
+
+It shows the total, deletes on the machine that runs the service, and says what re-downloads
+if you change your mind. The same thing from a shell:
+
+```bash
+python scripts/fetch_model.py --storage
+python scripts/fetch_model.py --delete qwen2.5-3b-instruct-q4_k_m
+python scripts/fetch_model.py --delete whisper:small      # free 486 MB
+python scripts/fetch_model.py --prune-parts
+```
+
 **Record / Stop** is one attribute: `0x16 = 2` starts a take, `0x16 = 0` stops it
 (verified on hardware, LED confirmed). Extra vendor writes around the start cancel it.
 
@@ -264,13 +324,18 @@ notra/frame.py        frame + TLV codec (pure, no I/O)
 notra/crc.py          CRC16 tables from the SDK
 notra/transport.py    BleTransport (bleak) and ReplayTransport (btsnoop)
 notra/client.py       session: heartbeat, attributes, settings, file pull
-notra/ai.py           whisper + summaries, local GGUF catalog
-notra/cli.py          command line
-tests/test_frame.py   offline regression tests
+notra/ai.py           whisper + summaries, local GGUF catalog, model housekeeping
+notra/search.py       BM25 index over transcripts/summaries + cited answers
+notra/cli.py          command line (scan, info, pull, transcribe, summary, find, ask)
+tests/test_frame.py   offline protocol regression tests
+tests/test_search.py  retrieval, citations and library-loading tests
 app/                  Flutter client (see app/README.md)
+app/lib/import/       share-sheet import + Boya OS export parsers (TXT/MD/SRT/JSON)
+app/lib/ui/ask_sheet.dart      search / ask sheet
+app/lib/ui/models_section.dart model housekeeping panel
 web/index.html        Web Bluetooth console
-scripts/ai_server.py  local transcript/summary service
-scripts/fetch_model.py  download a summary GGUF from the catalog
+scripts/ai_server.py  local transcript/summary/search service
+scripts/fetch_model.py  download, list or delete a summary GGUF
 scripts/make_icon.py  regenerate the launcher icon + favicon
 ```
 

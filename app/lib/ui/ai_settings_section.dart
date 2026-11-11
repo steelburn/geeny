@@ -34,6 +34,7 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
   String? _downloading;
   int _received = 0;
   int _total = 0;
+  int _modelsSeen = 0;
 
   @override
   void initState() {
@@ -42,6 +43,15 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
     _key = TextEditingController(text: s.externalKey);
     _extSpeech = TextEditingController(text: s.externalSpeech);
     _extSummary = TextEditingController(text: s.externalSummary);
+    _modelsSeen = widget.takes.modelsRevision;
+    widget.takes.addListener(_onTakesChanged);
+    _refreshHealth();
+  }
+
+  /// A model deleted under "Models on this machine" must leave this picker too.
+  void _onTakesChanged() {
+    if (widget.takes.modelsRevision == _modelsSeen) return;
+    _modelsSeen = widget.takes.modelsRevision;
     _refreshHealth();
   }
 
@@ -72,6 +82,7 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
 
   @override
   void dispose() {
+    widget.takes.removeListener(_onTakesChanged);
     _poll?.cancel();
     for (final c in [_extUrl, _key, _extSpeech, _extSummary]) {
       c.dispose();

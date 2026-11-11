@@ -487,3 +487,110 @@ and `qwen2.5-7b · 4.7 GB`; tapping 3B downloaded it in ~15 s and the app select
   lists **Geeny**; the home header reads `Geeny.`; after migration the new id shows all 7
   takes, the editable title, the Sampling assignment, the cached notes and the 3B AI settings;
   `flutter analyze` clean; 34 tests pass.
+
+---
+
+## 18. Search/ask, Boya OS import, model housekeeping (2026-11-11, later)
+
+Three requests, all in and verified on the Lenovo tablet.
+
+### 1. AI search and chat across transcriptions/summaries
+
+| Piece | Path | Notes |
+|---|---|---|
+| `notra/search.py` | new | passage index (BM25), library loader, cited answers |
+| `scripts/ai_server.py` | extended | `/index`, `/search`, `/chat` on :8765 |
+| `app/lib/ai/ask.dart`, `ui/ask_sheet.dart` | new | Search/Ask sheet from the header magnifier |
+| `app/lib/ai/ai_client.dart`, `state/takes.dart` | extended | `indexDocuments`, `indexState`, `search`, `ask`, corpus builder |
+| `notra/cli.py` | extended | `python -m notra find "…"` / `ask "…" --library <dir>` |
+
+How it works: the app pushes the text it already has (transcript segments + summary sections +
+title/project/date) to the service, which rebuilds an in-memory index of ~700-character
+passages (speaker changes split a passage; summary sections are passages of their own). Search
+is BM25 with title/project weighting and a phrase bonus; CJK gets character bigrams, so Malay,
+English and Chinese all match. Ask takes the six best passages, numbers them and asks the local
+GGUF for a short answer with `[n]` citations. Without a GGUF the passages themselves are
+returned and labelled *extractive*. Nothing leaves the machine, and no audio is ever indexed.
+
+The index is revision-guarded so a search field does not re-push per keystroke, and
+`syncSearchIndex` checks `GET /index` so a restarted service (empty index) is re-filled
+automatically.
+
+Verified on the tablet: 1 take / 4 passages indexed; searching "language" returned the summary
+sections and the transcript line with its timestamp; Ask with the 3B model answered
+`[1] Rekod tak bermakna kita menggunakan transkripsi atau transkripsi.`, cited source `[1]`
+highlighted, and tapping it opened the notes sheet on the Transcript pane at `00:00`.
+
+### 2. Import from Boya OS
+
+Boya OS has no import API — recordings live in its cloud. Its APK does have a share/export
+surface (see `research/VENDOR_AI.md`): `shareAndroidFile`, "Export Audio" (WAV/MP3/Ogg), "Export
+Transcript" as TXT/Markdown/SRT/DOCX/PDF. Geeny now accepts what that app can hand over.
+
+| Piece | Path | Notes |
+|---|---|---|
+| `MainActivity.kt`, `AndroidManifest.xml` | extended | ACTION_SEND/VIEW filters + `dev.geeny.app/share` channel (copies the content URI into cache), ACTION_OPEN_DOCUMENT picker |
+| `app/lib/import/share_in.dart` | new | Dart side of the channel, typed `SharedFile` |
+| `app/lib/import/boya_import.dart` | new | TXT / Markdown / SRT / JSON parsers → transcript segments + summary sections |
+| `app/lib/state/takes.dart` | extended | `importShared`, `importAudio`, `importNote`, notes-only takes, `notice` |
+| `app/lib/ui/takes_section.dart` | extended | Import sheet, import notice, disabled Play on audio-less takes |
+
+- Sharing audio creates a normal, playable take (`boya-<name>-<stamp>.ogg`); `opus`/`oga` are
+  stored as `.ogg` so the local pipeline reads them. Ogg/WAV transcribe; MP3/M4A play but the
+  local service cannot decode them — the import notice says so instead of failing later.
+- A transcript export is attached to the take with the same stem (or the same title), otherwise
+  it becomes a **transcript-only take**: a `.notes.json` with no audio beside it. It is listed,
+  searchable, readable, exportable and deletable; Play is disabled and the row says
+  "transcript only".
+- DOCX/PDF are rejected with a message telling the user to export TXT/Markdown/SRT.
+
+Verified on the tablet: `am start -a SEND -t text/plain --es android.intent.extra.TEXT …`
+produced `imported-…ogg.notes.json`, the notice "…as a transcript-only take — the audio stayed
+in Boya OS", a row with a disabled Play button, row actions without Play, and a working delete.
+Picking a pushed `.ogg` from the system picker (`Import → Choose a file → Downloads`) produced
+`boya-Boya lecture 11 Nov-2026-11-11T0908.ogg`, playable, with its duration read correctly.
+
+**Fixed while testing:** `Take.readDuration` took the *maximum* granule across Ogg pages; one
+damaged page reported a 48 s take as `175:41`. It now uses the last page's granule (the Ogg
+definition) and falls back to the max only when the final granule is zero. Covered by
+`app/test/duration_test.dart`.
+
+### 3. Housekeeping — delete downloaded models
+
+| Piece | Path | Notes |
+|---|---|---|
+| `notra/ai.py` | extended | `model_storage()`, `delete_model()`, whisper HF-cache detection |
+| `scripts/ai_server.py` | extended | `GET /models/storage`, `POST /models/delete` (unloads first) |
+| `app/lib/ui/models_section.dart` | new | Setup → Models on this machine |
+| `scripts/fetch_model.py` | extended | `--storage`, `--delete NAME`, `--delete whisper:small`, `--prune-parts` |
+
+Lists summary GGUFs, whisper snapshots under `~/.cache/huggingface/hub/models--*faster-whisper*`
+and interrupted `.part` files, with sizes and a total. Delete is confirmed, unloads the model
+before unlinking (Windows keeps a handle), refuses while that model is downloading, and only
+matches names that exist on disk — a request cannot name an arbitrary path. Deleting the
+selected summary model resets the setting to `auto`; the settings panel refreshes its catalog
+via `Takes.modelsRevision`.
+
+Verified on the tablet: 6 models / 3.86 GB listed, deleting a planted 1 MB GGUF reported
+"1 MB freed" and the file disappeared; a planted `.part` was removed the same way; a planted
+whisper cache directory was deleted through the API (`freed: 300000`) and path traversal was
+rejected.
+
+### Also fixed in this round (found by the above)
+
+- **Two services could listen on :8765 and silently split requests** (one gets `/index`, the
+  other `/chat`), each loading its own model. `ai_server.py` now probes `/health` first and
+  refuses to start a second instance. Kill stale ones with `netstat -ano | grep :8765`.
+- **llama.cpp is driven under a lock** (`ai._LLM_LOCK`): concurrent summarize/title/chat calls
+  previously raced inside the native library (GGML asserts, process death). Concurrent
+  `/chat` now serialises and completes.
+- **`/health` no longer blocks**: the torch/diarizer import and the three-port LLM probe are
+  warmed in background timers, so a poll is ~3 ms instead of ~2 s (which used to make the app's
+  first probe time out).
+- `ai_server.py` warms `speakers` after 8 s and reports `index` state in `/health`.
+
+Verified: `flutter analyze` clean, **48 tests** pass (`flutter test`), `python tests/test_search.py`
+and `python tests/test_frame.py` pass, `ux_audit` green on the shared web stylesheet. Known
+limits: no word-level highlighting inside a search hit; answers are limited to six passages
+(larger libraries are summarised by retrieval, not exhaustive); DOCX/PDF exports are not parsed;
+a transcript-only take cannot be played.

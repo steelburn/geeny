@@ -102,6 +102,52 @@ def _cmd_summary(args) -> int:
     return 0
 
 
+def _library_index(args):
+    """Search index built from the notes sidecars in a library directory."""
+    from . import search
+
+    documents = search.documents_from_library(args.library)
+    index = search.Index()
+    index.replace(documents)
+    if not len(index):
+        print(f"no transcripts in {args.library} yet — transcribe a take first", file=sys.stderr)
+    return index
+
+
+def _cmd_find(args) -> int:
+    index = _library_index(args)
+    hits = index.search(args.query, limit=args.limit)
+    if not hits:
+        print(f"nothing matches “{args.query}”")
+        return 1
+    for hit in hits:
+        stamp = ("summary" if hit["start"] is None
+                 else f"{int(hit['start']) // 60:02d}:{int(hit['start']) % 60:02d}")
+        print(f"{hit['score']:>6.2f}  {hit['title']}  · {stamp}")
+        print(f"        {hit['text']}")
+    return 0
+
+
+def _cmd_ask(args) -> int:
+    from . import search
+
+    index = _library_index(args)
+    hits = index.search(args.question, limit=args.limit)
+    if not hits:
+        print(f"nothing in the notes matches “{args.question}”")
+        return 1
+    result = search.build_answer(args.question, hits, model_name=args.model)
+    print(result["answer"])
+    print()
+    for i, source in enumerate(result["sources"], start=1):
+        stamp = ("summary" if source["start"] is None
+                 else f"{int(source['start']) // 60:02d}:{int(source['start']) % 60:02d}")
+        mark = "*" if i in result["cited"] else " "
+        print(f" {mark}[{i}] {source['title']}  · {stamp}")
+    print(f"\n({result['engine']})")
+    return 0
+
+
 def _cmd_frames(args) -> int:
     t = ReplayTransport(args.path)
     shown = 0
@@ -189,6 +235,19 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("path")
     st.add_argument("--verbose", action="store_true")
     st.set_defaults(fn=_cmd_selftest)
+
+    fd = sub.add_parser("find", help="search transcripts and summaries")
+    fd.add_argument("query")
+    fd.add_argument("--library", default=".", help="directory of takes + .notes.json sidecars")
+    fd.add_argument("--limit", type=int, default=10)
+    fd.set_defaults(fn=_cmd_find)
+
+    ak = sub.add_parser("ask", help="ask a question across the notes")
+    ak.add_argument("question")
+    ak.add_argument("--library", default=".", help="directory of takes + .notes.json sidecars")
+    ak.add_argument("--model", help="GGUF stem to answer with (default: the service default)")
+    ak.add_argument("--limit", type=int, default=6)
+    ak.set_defaults(fn=_cmd_ask)
 
     args = p.parse_args(argv)
     return args.fn(args)

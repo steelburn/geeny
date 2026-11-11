@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import '../state/session.dart';
 import '../theme/tokens.dart';
 import 'ai_settings_section.dart';
+import 'ask_sheet.dart';
 import 'disclosure.dart';
 import 'log_panel.dart';
+import 'models_section.dart';
 import 'takes_section.dart';
 import 'widgets.dart';
 
@@ -126,6 +128,15 @@ class _Header extends StatelessWidget {
         ],
         StatusPill(state: state, label: label),
         const SizedBox(width: Tokens.s2),
+        IconButton(
+          onPressed: () => openAsk(context, session.takes),
+          tooltip: 'Search or ask your takes',
+          constraints: const BoxConstraints(
+            minWidth: Tokens.target,
+            minHeight: Tokens.target,
+          ),
+          icon: const Icon(Icons.search, size: 20, color: Tokens.inkSoft),
+        ),
         Builder(
           builder: (ctx) => IconButton(
             onPressed: () => Scaffold.of(ctx).openEndDrawer(),
@@ -377,6 +388,12 @@ class _SetupPanel extends StatelessWidget {
                 ),
                 initiallyOpen: true,
                 child: AiSettingsSection(takes: session.takes),
+              ),
+              const SizedBox(height: Tokens.s5),
+              Disclosure(
+                title: 'Models on this machine',
+                trailing: Text('free up space', style: Tokens.dataSmall),
+                child: ModelHousekeeping(takes: session.takes),
               ),
               const SizedBox(height: Tokens.s5),
               _Diagnostics(session: session),

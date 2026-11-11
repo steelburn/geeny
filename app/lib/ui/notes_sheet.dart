@@ -13,7 +13,11 @@ import 'widgets.dart';
 
 /// Opens the transcript/summary sheet for a take. Runs the local AI service on
 /// first use; the transcript's timestamps seek the player.
-Future<void> openNotes(BuildContext context, Takes takes, Take take) {
+///
+/// [showTranscript] opens on the transcript pane, which is what a search result
+/// or an imported export wants to show.
+Future<void> openNotes(BuildContext context, Takes takes, Take take,
+    {bool showTranscript = false}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -22,14 +26,21 @@ Future<void> openNotes(BuildContext context, Takes takes, Take take) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(Tokens.r2)),
     ),
-    builder: (_) => SheetSurface(child: _NotesSheet(takes: takes, take: take)),
+    builder: (_) => SheetSurface(
+      child: _NotesSheet(takes: takes, take: take, showTranscript: showTranscript),
+    ),
   );
 }
 
 class _NotesSheet extends StatefulWidget {
-  const _NotesSheet({required this.takes, required this.take});
+  const _NotesSheet({
+    required this.takes,
+    required this.take,
+    this.showTranscript = false,
+  });
   final Takes takes;
   final Take take;
+  final bool showTranscript;
 
   @override
   State<_NotesSheet> createState() => _NotesSheetState();
@@ -42,6 +53,7 @@ class _NotesSheetState extends State<_NotesSheet> {
   @override
   void initState() {
     super.initState();
+    showTranscript = widget.showTranscript;
     final existing = widget.takes.notes[widget.take.file.path];
     if (existing != null) template = existing.template;
     // Only start work when something is actually missing; an existing transcript

@@ -15,6 +15,8 @@ import json
 import math
 import os
 import pathlib
+import shutil
+import threading
 import time
 import re
 import urllib.error
@@ -367,6 +369,15 @@ def _llm_available(max_age: float = 30.0) -> str | None:
     return found
 
 
+def llm_available_cached() -> str | None:
+    """The last probe's answer, without probing again.
+
+    `/health` is polled; three dead ports at 0.4 s each would make every poll slow.
+    The service warms this in the background instead.
+    """
+    return _LLM_CACHE["url"]  # type: ignore[return-value]
+
+
 def summarize_llm(transcript: Transcript, template: str = "plain", endpoint: str | None = None,
                   model: str | None = None, timeout: float = 90.0) -> dict | None:
     """Ask a local OpenAI-compatible server for a summary; None when unavailable."""
@@ -405,7 +416,19 @@ def summarize_llm(transcript: Transcript, template: str = "plain", endpoint: str
 
 
 _GGUF: dict[str, object] = {}
+# llama.cpp is not safe to drive from two threads at once: model loading and
+# generation share state inside the native library. Every GGUF call takes this
+# lock, so a summary, a title and a chat question queue up instead of corrupting
+# each other. RLock because the helpers nest.
+_LLM_LOCK = threading.RLock()
 MODELS_DIR = DEFAULT_LLM.parent
+
+# faster-whisper pulls its weights through huggingface_hub, which keeps a copy per
+# size under the HF cache. That is the other half of "downloaded models": deleting
+# a summary GGUF alone may not free the space a person is looking at.
+HF_HUB = pathlib.Path(os.environ.get("HF_HUB_CACHE")
+                      or os.environ.get("HF_HOME", pathlib.Path.home() / ".cache" / "huggingface"))
+HF_HUB = HF_HUB if HF_HUB.name == "hub" else HF_HUB / "hub"
 
 
 def available_llms() -> list[str]:
@@ -472,29 +495,136 @@ def download_model(name: str, models_dir: pathlib.Path | str | None = None,
     return target
 
 
-def _gguf_llm(name: str | None = None):
-    path = llm_model_path(name)
-    if path is None:
-        return None
-    model = _GGUF.get(path.stem)
-    if model is None:
+# --- housekeeping: what models take space, and how to free it ----------------
+
+def _dir_bytes(path: pathlib.Path) -> int:
+    total = 0
+    for p in path.rglob("*"):
         try:
-            from llama_cpp import Llama
-        except ImportError:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def whisper_cache_dirs() -> list[tuple[str, pathlib.Path]]:
+    """(label, directory) for whisper weights in the Hugging Face cache.
+
+    Only `faster-whisper` snapshots are reported — the cache is shared with every
+    other tool on the machine, so nothing here may be swept wholesale.
+    """
+    if not HF_HUB.is_dir():
+        return []
+    found: list[tuple[str, pathlib.Path]] = []
+    for entry in sorted(HF_HUB.iterdir()):
+        if not entry.is_dir() or "faster-whisper" not in entry.name:
+            continue
+        label = entry.name.rsplit("faster-whisper-", 1)[-1]
+        found.append((label, entry))
+    return found
+
+
+def model_storage() -> dict:
+    """Everything the AI pipeline has downloaded, with sizes.
+
+    The app shows this as housekeeping: a single list of GB you can get back.
+    """
+    entries: list[dict] = []
+    for path in sorted(MODELS_DIR.glob("*.gguf")) if MODELS_DIR.is_dir() else []:
+        entries.append({
+            "kind": "summary",
+            "name": path.stem,
+            "file": path.name,
+            "bytes": path.stat().st_size,
+            "path": str(path),
+        })
+    for part in sorted(MODELS_DIR.glob("*.part")) if MODELS_DIR.is_dir() else []:
+        entries.append({
+            "kind": "partial",
+            "name": part.name,
+            "file": part.name,
+            "bytes": part.stat().st_size,
+            "path": str(part),
+        })
+    for label, directory in whisper_cache_dirs():
+        entries.append({
+            "kind": "speech",
+            "name": label,
+            "file": directory.name,
+            "bytes": _dir_bytes(directory),
+            "path": str(directory),
+        })
+    return {
+        "models": entries,
+        "total_bytes": sum(int(e["bytes"]) for e in entries),
+        "models_dir": str(MODELS_DIR),
+        "whisper_cache": str(HF_HUB),
+    }
+
+
+def delete_model(kind: str, name: str) -> int:
+    """Remove one downloaded model and return the bytes freed.
+
+    `kind` is `summary` (a GGUF in MODELS_DIR), `partial` (an interrupted download)
+    or `speech` (a whisper snapshot in the HF cache). Names are matched against
+    what is actually on disk, never used as a path, so a stale request cannot
+    delete an unrelated file.
+    """
+    name = str(name or "")
+    if kind in ("summary", "partial"):
+        pattern = "*.part" if kind == "partial" else "*.gguf"
+        candidates = {p.name: p for p in MODELS_DIR.glob(pattern)}
+        target = candidates.get(name) or (candidates.get(f"{name}.gguf")
+                                         if kind == "summary" else None)
+        if target is None:
+            raise FileNotFoundError(f"no downloaded model named {name!r}")
+        freed = target.stat().st_size
+        _GGUF.pop(target.stem, None)
+        target.unlink()
+        return freed
+
+    if kind == "speech":
+        for label, directory in whisper_cache_dirs():
+            if label == name or directory.name == name:
+                freed = _dir_bytes(directory)
+                shutil.rmtree(directory, ignore_errors=False)
+                return freed
+        raise FileNotFoundError(f"no whisper model named {name!r} in {HF_HUB}")
+
+    raise ValueError(f"unknown model kind {kind!r}")
+
+
+def _gguf_llm(name: str | None = None):
+    with _LLM_LOCK:
+        path = llm_model_path(name)
+        if path is None:
             return None
-        model = Llama(
-            model_path=str(path),
-            n_ctx=4096,
-            n_threads=max(2, (os.cpu_count() or 4) // 2),
-            verbose=False,
-        )
-        _GGUF[path.stem] = model
-    return model
+        model = _GGUF.get(path.stem)
+        if model is None:
+            try:
+                from llama_cpp import Llama
+            except ImportError:
+                return None
+            model = Llama(
+                model_path=str(path),
+                n_ctx=4096,
+                n_threads=max(2, (os.cpu_count() or 4) // 2),
+                verbose=False,
+            )
+            _GGUF[path.stem] = model
+        return model
 
 
 def summarize_gguf(transcript: Transcript, template: str = "plain", model_name: str | None = None,
                    timeout: float = 180.0) -> dict | None:
     """Summarise with a local GGUF (llama.cpp). No network, no account."""
+    with _LLM_LOCK:
+        return _summarize_gguf_locked(transcript, template, model_name)
+
+
+def _summarize_gguf_locked(transcript: Transcript, template: str,
+                           model_name: str | None) -> dict | None:
     model = _gguf_llm(model_name)
     if model is None:
         return None
@@ -552,29 +682,36 @@ def make_title(transcript: Transcript, model_name: str | None = None) -> str:
     text = transcript.text.strip()
     if not text:
         return ''
-    model = _gguf_llm(model_name)
-    if model is not None and len(text.split()) >= 12:
-        try:
-            out = model.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": "You write very short, specific titles."},
-                    {"role": "user", "content":
-                        "Give this transcript a title of 3 to 6 words. Use the language of the "
-                        "transcript. Reply with the title only, no quotes, no punctuation at the end.\n\n"
-                        + text[:4000]},
-                ],
-                max_tokens=24,
-                temperature=0.3,
-            )
-            title = out["choices"][0]["message"]["content"].strip().strip('"').strip("'")
-            title = title.splitlines()[0][:80].rstrip(" .,:;-")
-            if title:
-                return title
-        except Exception:
-            pass
+    with _LLM_LOCK:
+        title = _title_from_gguf(text, model_name)
+    if title:
+        return title
     # fallback: a short, deterministic lead-in from the transcript
     words = text.split()
     return " ".join(words[:7]).rstrip(" .,:;-") + ("…" if len(words) > 7 else "")
+
+
+def _title_from_gguf(text: str, model_name: str | None) -> str | None:
+    model = _gguf_llm(model_name)
+    if model is None or len(text.split()) < 12:
+        return None
+    try:
+        out = model.create_chat_completion(
+            messages=[
+                {"role": "system", "content": "You write very short, specific titles."},
+                {"role": "user", "content":
+                    "Give this transcript a title of 3 to 6 words. Use the language of the "
+                    "transcript. Reply with the title only, no quotes, no punctuation at the end.\n\n"
+                    + text[:4000]},
+            ],
+            max_tokens=24,
+            temperature=0.3,
+        )
+        title = out["choices"][0]["message"]["content"].strip().strip('"').strip("'")
+        title = title.splitlines()[0][:80].rstrip(" .,:;-")
+        return title or None
+    except Exception:
+        return None
 
 
 # --- rendering --------------------------------------------------------------

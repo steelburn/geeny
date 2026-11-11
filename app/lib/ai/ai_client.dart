@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import 'ai_settings.dart';
+import 'ask.dart';
 import 'notes.dart';
 
 /// Client for transcription/summaries.
@@ -135,6 +136,102 @@ class AiClient {
     } catch (_) {
       return null;
     }
+  }
+
+  /// What the downloaded models take on the serving machine.
+  Future<Map<String, dynamic>?> modelStorage() async {
+    try {
+      final r = await http
+          .get(_local('/models/storage'))
+          .timeout(const Duration(seconds: 20));
+      if (r.statusCode != 200) return null;
+      return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Remove one downloaded model (`summary`, `speech` or `partial`).
+  ///
+  /// A failure carries the service's own reason, because "could not delete"
+  /// without one is useless when the file is held open.
+  Future<({int freed, String? error})> deleteModel(String kind, String name) async {
+    try {
+      final r = await http
+          .post(_local('/models/delete'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'kind': kind, 'name': name}))
+          .timeout(const Duration(seconds: 30));
+      final body = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+      if (r.statusCode != 200) {
+        return (freed: 0, error: (body['error'] ?? 'delete failed').toString());
+      }
+      return (freed: (body['freed'] as num?)?.toInt() ?? 0, error: null);
+    } catch (e) {
+      return (freed: 0, error: 'Could not reach the local service: $e');
+    }
+  }
+
+  // --- search / ask ---------------------------------------------------------
+
+  /// Push the library's transcripts and summaries to the local index.
+  Future<Map<String, dynamic>?> indexDocuments(List<Map<String, dynamic>> documents) async {
+    try {
+      final r = await http
+          .post(_local('/index'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'documents': documents}))
+          .timeout(const Duration(seconds: 30));
+      if (r.statusCode != 200) return null;
+      return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// What the service currently holds. Used to notice a restarted service, whose
+  /// in-memory index is empty even though the app has already pushed once.
+  Future<Map<String, dynamic>?> indexState() async {
+    try {
+      final r = await http.get(_local('/index')).timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return null;
+      return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Ranked passages for a query. Empty when nothing matches.
+  Future<List<AskHit>> search(String query, {int limit = 12}) async {
+    final r = await http
+        .post(_local('/search'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'query': query, 'limit': limit}))
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) throw _fail(r);
+    final body = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    return [
+      for (final hit in (body['hits'] as List? ?? const []))
+        if (hit is Map) AskHit.fromJson(hit.cast<String, dynamic>()),
+    ];
+  }
+
+  /// A written answer with citations, from the local model.
+  Future<AskAnswer?> ask(String question, {int limit = 6}) async {
+    final r = await http
+        .post(_local('/chat'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'question': question,
+              'limit': limit,
+              if (settings.localSummary != 'auto' && settings.localSummary != 'extractive')
+                'summary_model': settings.localSummary,
+            }))
+        .timeout(const Duration(minutes: 4));
+    if (r.statusCode != 200) throw _fail(r);
+    final answer = AskAnswer.fromJson(jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>);
+    if (answer.answer.isEmpty && answer.sources.isEmpty) return null;
+    return answer;
   }
 
   Future<Map<String, dynamic>> transcribe(File audio,

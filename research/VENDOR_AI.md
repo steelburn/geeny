@@ -108,3 +108,33 @@ so batch transcription is the better fit.
   multipart vs presigned upload, whether audio is Opus or re-encoded, language hints.
 - `/api/asr/model/list` may reveal which vendor/model is used server-side; not needed for
   our own pipeline, but it documents the quality bar.
+
+## What the app can hand over (import surface)
+
+Extracted from `libapp.so` alongside the endpoints — this is what makes an import possible
+at all, because there is no API to read a recording back out of the vendor cloud:
+
+```
+shareAndroidFile filePath=          # Android share sheet, any file
+shareAndroidUrlString urlString=    # and links
+Export Audio                        # checkAndExportWAV, checkAndExportMP3
+Export Transcript / Export Summary  # exportTxt, exportMarkdown, exportPdf, exportDocx
+SrtExportUtils / shareSrt           # SRT with timestamps
+Export as PDF, TXT, Markdown, and more
+```
+
+So the practical interoperability path is file-based, not network-based:
+
+- **Audio**: share an exported recording (Ogg is best — that is the device format and the
+  local service decodes it; WAV also works; MP3/M4A need an external speech service).
+- **Text**: share an exported transcript. TXT, Markdown and SRT carry timestamps that become
+  seekable transcript rows. DOCX and PDF are not parsed.
+
+Geeny registers for `ACTION_SEND`/`ACTION_VIEW` on audio, TXT/Markdown/SRT and JSON, plus an
+in-app system picker, so both the Share button and the Export menu land somewhere useful.
+The vendor's own cloud stays untouched: no account, no key, no scraping — which is also why
+importing a recording that never left the phone is not possible.
+
+Checklist if a future firmware changes the export set: re-run the string dump, look for
+`exportTxt`/`exportMarkdown`/`checkAndExport*`, and update `app/lib/import/boya_import.dart`
+(the parsers are pure functions with unit tests in `app/test/import_test.dart`).
