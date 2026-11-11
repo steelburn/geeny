@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Design tokens for the Notra client.
+/// Design tokens for the Geeny client.
 ///
 /// Shared with `web/index.html` so the phone and the browser console read as the
 /// same tool: paper stock, ink type, one forest accent, monotone data.

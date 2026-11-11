@@ -1,4 +1,4 @@
-# Handoff — Boya Notra Neo direct client
+# Handoff — Geeny (Boya Notra Neo client)
 
 State of play, what is proven, what is left, and exactly how to run everything.
 Last updated at the end of the session that cracked the CRC and the pull protocol.
@@ -403,7 +403,7 @@ time) and portrait layout (tablet locked landscape in desktop mode).
    pure decision (transcribe+summarise / summarise only / none), so opening a take with a
    transcript never re-transcribes, and a matching summary never re-runs. Only Redo
    (`force: true`) repeats both; changing the template re-runs just the summary.
-5. **Launcher icon.** `scripts/make_icon.py` draws the mark (forest stock, paper microphone,
+5. **Launcher icon.** `scripts/make_icon.py` draws the mark (forest stock, a paper **G**,
    one sage recording light) and writes the five legacy mipmaps, the adaptive icon,
    `drawable/ic_launcher_foreground.xml`, `values/colors.xml`, `app/assets/brand/icon.svg`
    and `web/favicon.svg`. Regenerate after touching the palette.
@@ -462,3 +462,22 @@ and `qwen2.5-7b · 4.7 GB`; tapping 3B downloaded it in ~15 s and the app select
 `GET /health`. With 3B, the same 48 s take produced all three lecture sections in order
 (`Overview`, `Key concepts`, `To review`) and clean bullets; `/summarize` was called without
 `/transcribe` when switching template. `flutter analyze` clean; 34 tests pass.
+
+---
+
+## 17. Renamed to Geeny, new launcher mark (2026-11-11)
+
+- **Product name is Geeny.** Android `android:label`, `MaterialApp.title`, the in-app wordmark
+  (`Geeny.`), the web console (`<title>` + `<h1>`) and the docs now say Geeny. The device is
+  still the Boya Notra Neo, so the `notra/` Python package, `NotraClient`, the BLE scan filters
+  and the protocol notes keep that name.
+- **Internals were left alone on purpose.** Dart package `notra_app` and application id
+  `dev.notra.notra_app` are unchanged: renaming the id would install a second app and orphan
+  the existing takes/notes/library under the old package. Only the user-facing name changed.
+- **New icon.** `scripts/make_icon.py` now draws a geometric paper **G** on forest stock with
+  one sage recording light, replacing the microphone mark. It regenerates the five legacy
+  mipmaps, `mipmap-anydpi-v26` (adaptive + monochrome), the vector foreground,
+  `values/colors.xml`, `app/assets/brand/icon.svg` and `web/favicon.svg`.
+- **Verified:** `aapt2 dump badging` reports `application-label:'Geeny'`; the launcher/splash
+  shows the G mark and the app drawer lists **Geeny**; the home header reads `Geeny.`;
+  `flutter analyze` clean; 34 tests pass.

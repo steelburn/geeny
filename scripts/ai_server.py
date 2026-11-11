@@ -1,4 +1,4 @@
-"""Tiny local AI service for the Notra app (transcript + summary).
+"""Tiny local AI service for the Geeny app (transcript + summary).
 
 The vendor does this in the cloud; this keeps it on your own machine. The app posts
 the pulled `.ogg` here, gets a transcript back, then asks for a summary.

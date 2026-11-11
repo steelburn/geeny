@@ -1,8 +1,9 @@
-# notra — unofficial Boya Notra Neo client
+# Geeny — unofficial Boya Notra Neo client
 
-Talks to the device directly over BLE. No vendor app, no cloud, no account.
-Protocol recovered from the vendor's own `libcfdlink.so` and verified against hardware —
-see `research/PROTOCOL.md`.
+**Geeny** is the app; the `notra/` Python package and the protocol names keep the
+recorder's own name (Boya Notra Neo). It talks to the device directly over BLE. No vendor
+app, no cloud, no account. Protocol recovered from the vendor's own `libcfdlink.so` and
+verified against hardware — see `research/PROTOCOL.md`.
 
 > **Continuing from a previous session? Read `HANDOFF.md` first** — state, gotchas and
 > the one open problem are all written down there.
@@ -54,8 +55,8 @@ disclosures so the front page stays about recording. The status bar also shows t
 recorder's own free capacity (`attr 0x15`), so you know whether the next take fits.
 
 The launcher icon is generated, not hand-drawn: `scripts/make_icon.py` draws the mark (forest
-stock, paper microphone, one sage recording light) and writes the legacy mipmaps plus the
-adaptive-icon vector. Re-run it after changing the tokens.
+stock, a paper **G** for Geeny, one sage recording light) and writes the legacy mipmaps plus
+the adaptive-icon vector. Re-run it after changing the tokens.
 
 Every pulled payload is checksum-verified (crc16 + crc32); damaged frames are dropped and
 counted, never written into the audio.

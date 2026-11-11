@@ -1,6 +1,6 @@
 # notra_app
 
-Flutter client for the Boya Notra Neo recorder — scan, connect, record, pull takes,
+**Geeny** — Flutter client for the Boya Notra Neo recorder. Scan, connect, record, pull takes,
 play them, and transcribe/summarise locally or through an OpenAI-compatible service.
 
 The project overview, protocol notes and AI setup live in the repository root:

@@ -1,4 +1,4 @@
-"""Download a summary GGUF from the Notra model catalog.
+"""Download a summary GGUF from the Geeny model catalog.
 
 Transcription accuracy comes from the whisper size the service runs; this script
 only fetches **summary** models. Bigger models write tighter notes and are slower.

@@ -1,8 +1,8 @@
-"""Draw the Notra launcher icon and write every Android asset that uses it.
+"""Draw the Geeny launcher icon and write every asset that uses it.
 
-The mark is the app's own material: forest ink, paper stock, and a microphone
-built from a ruled stand — plus one sage "recording light". No gradients, no
-glow, two colours and a dot.
+The mark is the app's own material: forest stock, paper ink, one sage recording
+light, and a geometric **G** for Geeny. No gradients, no glow, two colours and a
+dot.
 
     python scripts/make_icon.py
 
@@ -30,19 +30,18 @@ PAPER = (0xF5, 0xF3, 0xED)
 SAGE = (0xE3, 0xED, 0xE7)
 
 # --- geometry, in normalized 0..1 icon units -------------------------------
-RADIUS = 0.22
+RADIUS = 0.22              # rounded-square corner
 
-CAPSULE = (0.425, 0.200, 0.575, 0.520)   # x0, y0, x1, y1
-CAPSULE_R = 0.075
+CX = CY = 0.5
+R_OUT = 0.290              # G ring, outer radius
+R_IN = 0.175               # G ring, inner radius
+OPENING = 30.0             # half-angle of the mouth on the right, degrees
 
-ARC_CENTER = (0.5, 0.50)
-ARC_R = 0.175
-STROKE = 0.045                            # full stroke width
+CROSSBAR = (0.460, 0.455, 0.760, 0.545)   # x0, y0, x1, y1
+CONNECTOR = (0.690, 0.455, 0.770, 0.658)  # the G's spur, down to the lower arc
+SPUR_RADIUS = 0.020
 
-STEM = ((0.5, 0.675), (0.5, 0.745))
-BASE = ((0.40, 0.78), (0.60, 0.78))
-
-LIGHT = (0.725, 0.295, 0.028)             # cx, cy, r
+LIGHT = (0.800, 0.220, 0.026)             # cx, cy, r — the recording light
 
 
 def _round_rect(x: float, y: float, x0: float, y0: float, x1: float, y1: float,
@@ -54,23 +53,16 @@ def _round_rect(x: float, y: float, x0: float, y0: float, x1: float, y1: float,
     return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r <= 0
 
 
-def _segment(x: float, y: float, a: tuple[float, float], b: tuple[float, float],
-             half: float) -> bool:
-    ax, ay = a
-    bx, by = b
-    dx, dy = bx - ax, by - ay
-    span = dx * dx + dy * dy
-    t = 0.0 if span == 0 else max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / span))
-    return math.hypot(x - (ax + t * dx), y - (ay + t * dy)) <= half
-
-
 def _glyph(x: float, y: float) -> bool:
-    if _round_rect(x, y, *CAPSULE, CAPSULE_R):
+    dx, dy = x - CX, y - CY
+    distance = math.hypot(dx, dy)
+    angle = math.degrees(math.atan2(dy, dx))
+    ring = R_IN <= distance <= R_OUT and not (-OPENING <= angle <= OPENING)
+    if ring:
         return True
-    cx, cy = ARC_CENTER
-    if y >= cy and abs(math.hypot(x - cx, y - cy) - ARC_R) <= STROKE / 2:
+    if _round_rect(x, y, *CROSSBAR, SPUR_RADIUS):
         return True
-    if _segment(x, y, *STEM, STROKE / 2) or _segment(x, y, *BASE, STROKE / 2):
+    if _round_rect(x, y, *CONNECTOR, SPUR_RADIUS):
         return True
     return False
 
@@ -140,24 +132,35 @@ def _png(path: Path, n: int, rgba: bytes) -> None:
     path.write_bytes(blob)
 
 
-def _fg_xml() -> str:
-    def p(v: float) -> str:
-        return f"{v * 108:.2f}".rstrip("0").rstrip(".")
+def _p(v: float) -> str:
+    return f"{v * 108:.2f}".rstrip("0").rstrip(".")
 
-    x0, y0, x1, y1 = CAPSULE
-    cx, cy = ARC_CENTER
-    r = CAPSULE_R
-    midx = (x0 + x1) / 2
-    cap = (f"M{p(midx)},{p(y0)} A{p(r)},{p(r)} 0 0 1 {p(x1)},{p(y0 + r)} "
-           f"L{p(x1)},{p(y1 - r)} A{p(r)},{p(r)} 0 0 1 {p(x0)},{p(y1 - r)} "
-           f"L{p(x0)},{p(y0 + r)} A{p(r)},{p(r)} 0 0 1 {p(midx)},{p(y0)} Z")
-    arc = (f"M{p(cx - ARC_R)},{p(cy)} A{p(ARC_R)},{p(ARC_R)} 0 0 1 "
-           f"{p(cx + ARC_R)},{p(cy)}")
-    stem = f"M{p(STEM[0][0])},{p(STEM[0][1])} L{p(STEM[1][0])},{p(STEM[1][1])}"
-    base = f"M{p(BASE[0][0])},{p(BASE[0][1])} L{p(BASE[1][0])},{p(BASE[1][1])}"
+
+def _rect_path(x0: float, y0: float, x1: float, y1: float, r: float) -> str:
+    """Rounded-rectangle path in 108-unit viewport coordinates."""
+    X0, Y0, X1, Y1, R = _p(x0), _p(y0), _p(x1), _p(y1), _p(r)
+    return (f"M{X0},{Y0} H{X1} V{Y1} H{X0} Z"
+            if r <= 0 else
+            f"M{_p(x0 + r)},{Y0} H{_p(x1 - r)} A{R},{R} 0 0 1 {X1},{_p(y0 + r)} "
+            f"V{_p(y1 - r)} A{R},{R} 0 0 1 {_p(x1 - r)},{Y1} H{_p(x0 + r)} "
+            f"A{R},{R} 0 0 1 {X0},{_p(y1 - r)} V{_p(y0 + r)} "
+            f"A{R},{R} 0 0 1 {_p(x0 + r)},{Y0} Z")
+
+
+def _ring_path() -> str:
+    """Annular sector: the G's body, open on the right."""
+    a = math.radians(OPENING)
+    ox, oy = CX + R_OUT * math.cos(-a), CY + R_OUT * math.sin(-a)
+    oy2 = CY + R_OUT * math.sin(a)
+    ix, iy = CX + R_IN * math.cos(-a), CY + R_IN * math.sin(-a)
+    iy2 = CY + R_IN * math.sin(a)
+    return (f"M{_p(ox)},{_p(oy)} A{_p(R_OUT)},{_p(R_OUT)} 0 1 0 "
+            f"{_p(ox)},{_p(oy2)} L{_p(ix)},{_p(iy2)} "
+            f"A{_p(R_IN)},{_p(R_IN)} 0 1 1 {_p(ix)},{_p(iy)} Z")
+
+
+def _fg_xml() -> str:
     lx, ly, lr = LIGHT
-    stroke = f'android:strokeColor="#F5F3ED" android:strokeWidth="{p(STROKE)}" ' \
-             'android:strokeLineCap="round"'
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!-- Generated by scripts/make_icon.py — edit the script, not this file. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -165,11 +168,10 @@ def _fg_xml() -> str:
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path android:pathData="{cap}" android:fillColor="#F5F3ED" />
-    <path android:pathData="{arc}" {stroke} android:fillColor="@android:color/transparent" />
-    <path android:pathData="{stem}" {stroke} android:fillColor="@android:color/transparent" />
-    <path android:pathData="{base}" {stroke} android:fillColor="@android:color/transparent" />
-    <path android:pathData="M{p(lx - lr)},{p(ly)} a{p(lr)},{p(lr)} 0 1 0 {p(lr * 2)},0 a{p(lr)},{p(lr)} 0 1 0 {p(-lr * 2)},0 Z"
+    <path android:pathData="{_ring_path()}" android:fillColor="#F5F3ED" />
+    <path android:pathData="{_rect_path(*CROSSBAR, SPUR_RADIUS)}" android:fillColor="#F5F3ED" />
+    <path android:pathData="{_rect_path(*CONNECTOR, SPUR_RADIUS)}" android:fillColor="#F5F3ED" />
+    <path android:pathData="M{_p(lx - lr)},{_p(ly)} a{_p(lr)},{_p(lr)} 0 1 0 {_p(lr * 2)},0 a{_p(lr)},{_p(lr)} 0 1 0 {_p(-lr * 2)},0 Z"
         android:fillColor="#E3EDE7" />
 </vector>
 """
@@ -187,29 +189,14 @@ def _adaptive_xml() -> str:
 
 
 def _svg() -> str:
-    def p(v: float) -> str:
-        return f"{v * 108:.2f}".rstrip("0").rstrip(".")
-
-    x0, y0, x1, y1 = CAPSULE
-    cx, cy = ARC_CENTER
-    r = CAPSULE_R
-    midx = (x0 + x1) / 2
     lx, ly, lr = LIGHT
-    cap = (f"M{p(midx)},{p(y0)} A{p(r)},{p(r)} 0 0 1 {p(x1)},{p(y0 + r)} "
-           f"L{p(x1)},{p(y1 - r)} A{p(r)},{p(r)} 0 0 1 {p(x0)},{p(y1 - r)} "
-           f"L{p(x0)},{p(y0 + r)} A{p(r)},{p(r)} 0 0 1 {p(midx)},{p(y0)} Z")
-    arc = (f"M{p(cx - ARC_R)},{p(cy)} A{p(ARC_R)},{p(ARC_R)} 0 0 1 "
-           f"{p(cx + ARC_R)},{p(cy)}")
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
-  <!-- Notra: forest stock, paper mic, one sage recording light. -->
-  <rect width="108" height="108" rx="{p(RADIUS)}" fill="#175C44"/>
-  <circle cx="{p(lx)}" cy="{p(ly)}" r="{p(lr)}" fill="#E3EDE7"/>
-  <path d="{cap}" fill="#F5F3ED"/>
-  <path d="{arc}" fill="none" stroke="#F5F3ED" stroke-width="{p(STROKE)}" stroke-linecap="round"/>
-  <path d="M{p(STEM[0][0])},{p(STEM[0][1])} L{p(STEM[1][0])},{p(STEM[1][1])}" fill="none"
-        stroke="#F5F3ED" stroke-width="{p(STROKE)}" stroke-linecap="round"/>
-  <path d="M{p(BASE[0][0])},{p(BASE[0][1])} L{p(BASE[1][0])},{p(BASE[1][1])}" fill="none"
-        stroke="#F5F3ED" stroke-width="{p(STROKE)}" stroke-linecap="round"/>
+  <!-- Geeny: forest stock, paper G, one sage recording light. -->
+  <rect width="108" height="108" rx="{_p(RADIUS)}" fill="#175C44"/>
+  <circle cx="{_p(lx)}" cy="{_p(ly)}" r="{_p(lr)}" fill="#E3EDE7"/>
+  <path d="{_ring_path()}" fill="#F5F3ED"/>
+  <path d="{_rect_path(*CROSSBAR, SPUR_RADIUS)}" fill="#F5F3ED"/>
+  <path d="{_rect_path(*CONNECTOR, SPUR_RADIUS)}" fill="#F5F3ED"/>
 </svg>
 """
 

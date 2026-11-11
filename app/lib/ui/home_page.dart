@@ -104,7 +104,7 @@ class _Header extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.baseline,
               textBaseline: TextBaseline.alphabetic,
               children: [
-                Text('Notra', style: Tokens.display),
+                Text('Geeny', style: Tokens.display),
                 Text('.', style: Tokens.display.copyWith(color: Tokens.accent)),
               ],
             ),

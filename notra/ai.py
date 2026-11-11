@@ -1,4 +1,4 @@
-"""Transcription and summaries for Notra takes.
+"""Transcription and summaries for Geeny takes.
 
 The vendor app does this in the cloud (Azure Speech + a server-side LLM, see
 `research/VENDOR_AI.md`). This module is the local counterpart: whisper for the

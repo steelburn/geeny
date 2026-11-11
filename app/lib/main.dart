@@ -6,19 +6,19 @@ import 'theme/tokens.dart';
 import 'ui/home_page.dart';
 
 void main() {
-  runApp(const NotraApp());
+  runApp(const GeenyApp());
 }
 
-class NotraApp extends StatefulWidget {
-  const NotraApp({super.key, this.session});
+class GeenyApp extends StatefulWidget {
+  const GeenyApp({super.key, this.session});
 
   final Session? session;
 
   @override
-  State<NotraApp> createState() => _NotraAppState();
+  State<GeenyApp> createState() => _GeenyAppState();
 }
 
-class _NotraAppState extends State<NotraApp> {
+class _GeenyAppState extends State<GeenyApp> {
   late final Session _session = widget.session ?? Session();
 
   @override
@@ -30,7 +30,7 @@ class _NotraAppState extends State<NotraApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Notra',
+      title: 'Geeny',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
       home: HomePage(session: _session),
