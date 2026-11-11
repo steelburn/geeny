@@ -4,20 +4,32 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Notra — device console</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<meta name="theme-color" content="#175C44" />
 <style>
   :root {
+    /* tokens — mirrored in app/lib/theme/tokens.dart and DESIGN.md */
     --paper: #F5F3ED;
+    --surface: #FFFDF8;
+    --surface-hover: #FFFFFF;
     --ink: #1E2A24;
-    --ink-soft: #5A6660;
+    --ink-soft: #4F5A53;
     --rule: #D8D4C8;
-    --accent: #1E6B50;
+    --rule-strong: #A9A493;
+    --accent: #175C44;
+    --accent-pressed: #134A36;
     --accent-soft: #E3EDE7;
-    --danger: #8C3A2B;
+    --on-accent: #F7FBF8;
+    --danger: #7A3020;
+    --danger-soft: #F6E7E3;
+    --warn: #7A5514;
+    --dot-idle: #B9B4A6;
     --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
     --r1: 4px; --r2: 8px;
     --shadow-1: 0 1px 2px rgba(30, 42, 36, .10);
+    --shadow-0: none;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -42,28 +54,28 @@
   button {
     font: inherit; font-size: .9375rem; font-weight: 550;
     padding: var(--s2) var(--s4); border-radius: var(--r2);
-    border: 1px solid var(--rule); background: #FFFDF8; color: var(--ink);
+    border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink);
     cursor: pointer; box-shadow: var(--shadow-1);
     transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
   }
-  button:hover:not(:disabled) { background: #FFFFFF; border-color: #C7C2B4; }
+  button:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--ink-soft); }
   button:active:not(:disabled) { transform: translateY(1px); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  button:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #F7FBF8; }
-  button.primary:hover:not(:disabled) { background: #175841; border-color: #175841; }
-  button.ghost { background: transparent; box-shadow: none; }
+  button:disabled { opacity: .45; cursor: not-allowed; box-shadow: var(--shadow-0); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  button.primary:hover:not(:disabled) { background: var(--accent-pressed); border-color: var(--accent-pressed); }
+  button.ghost { background: transparent; box-shadow: var(--shadow-0); }
 
   .status { display: inline-flex; align-items: center; gap: var(--s2); font-size: .875rem; color: var(--ink-soft); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #B9B4A6; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dot-idle); }
   .dot.on { background: var(--accent); }
-  .dot.busy { background: #B07C1E; }
+  .dot.busy { background: var(--warn); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--s5); margin-top: var(--s5); }
   section { min-width: 0; }
   h2 {
-    font-size: .75rem; text-transform: uppercase; letter-spacing: .08em;
-    color: var(--ink-soft); font-weight: 650; margin: 0 0 var(--s3);
+    font-size: .8125rem; color: var(--ink-soft); font-weight: 600;
+    margin: 0 0 var(--s3);
   }
 
   dl.facts { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: var(--s2) var(--s4); }
@@ -72,7 +84,7 @@
 
   .log {
     font-family: var(--mono); font-size: .8125rem; line-height: 1.5;
-    background: #FFFDF8; border: 1px solid var(--rule); border-radius: var(--r2);
+    background: var(--surface); border: 1px solid var(--rule); border-radius: var(--r2);
     padding: var(--s3); height: 340px; overflow: auto; margin: 0;
     white-space: pre-wrap; word-break: break-all;
   }
@@ -130,8 +142,8 @@
       <h2>Mic gain</h2>
       <div class="bar">
         <input id="gain" type="number" min="0" max="30" step="1" value="24"
-               style="font: inherit; padding: 8px 12px; width: 90px; border: 1px solid var(--rule);
-                      border-radius: 8px; background: #FFFDF8; color: var(--ink);" />
+               style="font: inherit; padding: 8px 12px; width: 90px; border: 1px solid var(--rule-strong);
+                      border-radius: var(--r2); background: var(--surface); color: var(--ink);" />
         <span class="status">dB</span>
         <button id="applyGain" disabled>Apply</button>
       </div>
@@ -140,7 +152,8 @@
     <section>
       <h2>Recording</h2>
       <div class="bar">
-        <button id="activate" disabled>Activate</button>
+        <button id="activate" disabled>Arm</button>
+        <button id="deactivate" disabled>Deactivate</button>
         <button id="pull" disabled>Pull latest</button>
       </div>
       <p class="empty" id="pullStatus" style="margin-top: var(--s2)">
@@ -342,10 +355,41 @@ class Notra {
     await this.send({ flags: FLAG_STATUS, msgId: this.nextId(CH_SETTINGS), src: APP, dst: DEV, channel: CH_SETTINGS, payload });
   }
 
+  // File traffic is a 0x55 frame (flags 0x10 / 0x11) on CH_FILE whose payload is
+  // aa | crc32 | type | len u16 | body | crc16. Verified from capture extrec2.
   fileFrame(body) {
     const crc32 = zlibCrc32(body);
     const framed = [0xaa, crc32 & 0xff, (crc32 >>> 8) & 0xff, (crc32 >>> 16) & 0xff, (crc32 >>> 24) & 0xff, ...body];
-    return new Uint8Array([...framed, ...crcBytes(framed)]);
+    return [...framed, ...crcBytes(framed)];
+  }
+
+  fileSend(body) {
+    return this.send({
+      flags: FLAG_STATUS, msgId: this.nextId(CH_FILE), src: APP, dst: DEV,
+      channel: CH_FILE, payload: this.fileFrame(body),
+    });
+  }
+
+  static fileParse(pay) {
+    if (pay.length < 10 || pay[0] !== 0xaa) return null;
+    const type = pay[5];
+    const len = pay[6] | (pay[7] << 8);
+    if (!len || pay.length < 8 + len) return null;
+    return { type, body: pay.slice(8, 8 + len) };
+  }
+
+  fileWatch(timeout, label, onFrame) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error(label)); }, timeout);
+      const h = (fr) => {
+        if (fr.channel !== CH_FILE || fr.flags !== 0x11) return;
+        const parsed = Notra.fileParse(fr.payload);
+        if (!parsed) return;
+        const done = onFrame(parsed);
+        if (done !== undefined) { clearTimeout(timer); this.listeners.delete(h); resolve(done); }
+      };
+      this.listeners.add(h);
+    });
   }
 
   async activate() {
@@ -353,22 +397,40 @@ class Notra {
     await this.setAttr(0x0b, [0x01]);
   }
 
-  async openLatest(timeout = 5000) {
-    await this.send({ flags: FLAG_STATUS, msgId: this.nextId(CH_FILE_CTL), src: APP, dst: DEV, channel: CH_FILE_CTL, payload: [0x80, 0x01, 0x00, 0x01] });
-    const key = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error("no pending recording — record something first")); }, timeout);
-      const h = (fr) => {
-        if (fr.channel !== CH_FILE_CTL || fr.flags !== 0x11) return;
-        const b = fr.payload.slice(0, -2);
-        if (b[0] !== 0x80 || b[1] !== 0x04) return;
-        clearTimeout(timer); this.listeners.delete(h);
-        resolve(b[2] | (b[3] << 8) | (b[4] << 16) | (b[5] << 24));
-      };
-      this.listeners.add(h);
+  async deactivate() {
+    await this.setAttr(0x0b, [0x00]);
+    await this.setAttr(0x12, [0x00]);
+  }
+
+  /**
+   * Ask for the pending take's key. A finished take is not published until
+   * transfer mode is cycled, so a miss is retried once after 0x16 = 2 -> 0.
+   */
+  async fileKey(timeout = 5000) {
+    try {
+      return await this._pollKey(timeout);
+    } catch (_) {
+      await this.setAttr(0x16, [0x02]);
+      await new Promise((r) => setTimeout(r, 4000));
+      await this.setAttr(0x16, [0x00]);
+      await new Promise((r) => setTimeout(r, 500));
+      return this._pollKey(timeout);
+    }
+  }
+
+  async _pollKey(timeout = 5000) {
+    await this.fileSend([0x86, 0x02, 0x00, 0xe7, 0x03]);
+    return this.fileWatch(timeout, "no pending recording — record something first", ({ type, body }) => {
+      if (type === 0x86 && body.length >= 4) return body[0] | (body[1] << 8) | (body[2] << 16) | (body[3] << 24);
+      return undefined;
     });
-    const body = [0x81, 0x04, 0x00, key & 0xff, (key >>> 8) & 0xff, (key >>> 16) & 0xff, (key >>> 24) & 0xff];
-    await this.chr.writeValueWithoutResponse(this.fileFrame(body));
-    const meta = await this.awaitFrame(CH_FILE, 0x81, 5000);
+  }
+
+  async openLatest(timeout = 5000) {
+    const key = await this.fileKey(timeout);
+    await this.fileSend([0x81, 0x04, 0x00, key & 0xff, (key >>> 8) & 0xff, (key >>> 16) & 0xff, (key >>> 24) & 0xff]);
+    const meta = await this.fileWatch(timeout, "device did not describe the take", ({ type, body }) =>
+      type === 0x81 ? body : undefined);
     const info = { key };
     if (meta && meta.length >= 24) {
       info.hash = [...meta.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -378,94 +440,56 @@ class Notra {
     return info;
   }
 
-  awaitFrame(channel, type, timeout = 5000) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error("timeout")); }, timeout);
-      const h = (fr) => {
-        if (fr.channel !== channel || fr.flags !== 0x11) return;
-        const p = fr.payload;
-        if (p.length < 8 || p[0] !== 0xaa || p[5] !== type) return;
-        clearTimeout(timer); this.listeners.delete(h);
-        resolve(p.slice(6, -2));
-      };
-      this.listeners.add(h);
-    });
-  }
-
+  /** One request; the device streams every chunk, then sends 84 = complete. */
   async pullLatest(onProgress) {
     const info = await this.openLatest();
-    const out = [];
-    let offset = 0;
-    for (let guard = 0; guard < 800; guard++) {
-      const chunk = await this.requestChunk(info.key, offset);
-      out.push(chunk.data);
-      offset += chunk.data.length;
-      onProgress?.(offset, info.size);
-      if (chunk.data.length < 2090) break;
-    }
-    const total = out.reduce((n, p) => n + p.length, 0);
-    const bytes = new Uint8Array(total);
-    let at = 0;
-    for (const p of out) { bytes.set(p, at); at += p.length; }
-    await this.chr.writeValueWithoutResponse(this.fileFrame([0x84, 0x04, 0x00,
-      info.key & 0xff, (info.key >>> 8) & 0xff, (info.key >>> 16) & 0xff, (info.key >>> 24) & 0xff]));
-    return { bytes, info };
-  }
-
-  async fileKey(timeout = 4000) {
-    await this.send({ flags: FLAG_STATUS, msgId: this.nextId(CH_FILE_CTL), src: APP, dst: DEV, channel: CH_FILE_CTL, payload: [0x80, 0x01, 0x00, 0x01] });
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error("device did not report a file key")); }, timeout);
-      const h = (fr) => {
-        if (fr.channel !== CH_FILE_CTL || fr.flags !== 0x11) return;
-        const body = fr.payload.slice(0, -2);
-        if (body[0] !== 0x80 || body[1] !== 0x04) return;
-        clearTimeout(timer); this.listeners.delete(h);
-        resolve(body[2] | (body[3] << 8) | (body[4] << 16) | (body[5] << 24));
-      };
-      this.listeners.add(h);
-    });
-  }
-
-  requestChunk(key, offset, timeout = 8000) {
-    const body = [0x82, 0x08, 0x00,
+    const key = info.key;
+    const parts = new Map();
+    let have = 0;
+    await this.fileSend([0x82, 0x08, 0x00,
       key & 0xff, (key >>> 8) & 0xff, (key >>> 16) & 0xff, (key >>> 24) & 0xff,
-      offset & 0xff, (offset >>> 8) & 0xff, (offset >>> 16) & 0xff, (offset >>> 24) & 0xff];
-    this.chr.writeValueWithoutResponse(this.fileFrame(body));
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.listeners.delete(h); reject(new Error(`no chunk at offset ${offset}`)); }, timeout);
-      const h = (fr) => {
-        if (fr.channel !== CH_FILE || fr.flags !== 0x11) return;
-        const pay = fr.payload;
-        if (pay.length < 20 || pay[0] !== 0xaa) return;
-        const off = pay[12] | (pay[13] << 8) | (pay[14] << 16) | (pay[15] << 24);
-        const len = pay[16] | (pay[17] << 8);
-        clearTimeout(timer); this.listeners.delete(h);
-        resolve({ offset: off, data: Uint8Array.from(pay.slice(18, 18 + len)) });
-      };
-      this.listeners.add(h);
-    });
+      0, 0, 0, 0]);
+
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      const frame = await this.fileWatch(deadline - Date.now(), "transfer stalled", ({ type, body }) => {
+        if (type === 0x82 && body.length >= 10) return { chunk: body };
+        if (type === 0x84) return { done: true };
+        return undefined;
+      });
+      if (frame.done) break;
+      const b = frame.chunk;
+      const off = b[4] | (b[5] << 8) | (b[6] << 16) | (b[7] << 24);
+      const len = b[8] | (b[9] << 8);
+      parts.set(off, b.slice(10, 10 + len));
+      have += len;
+      onProgress?.(Math.min(have, info.size ?? have), info.size);
+      if (info.size && parts.has(0)) {
+        let total = 0;
+        while (parts.has(total)) total += parts.get(total).length;
+        if (total >= info.size) break;
+      }
+    }
+
+    await this.fileSend([0x85, 0x04, 0x00,
+      key & 0xff, (key >>> 8) & 0xff, (key >>> 16) & 0xff, (key >>> 24) & 0xff]);
+
+    const size = info.size ?? 0;
+    const out = new Uint8Array(size || have);
+    let at = 0;
+    while (at < out.length && parts.has(at)) {
+      const part = parts.get(at);
+      out.set(part, at);
+      at += part.length;
+    }
+    return { bytes: out.subarray(0, at), info };
   }
 
   async pullFile(id, onProgress) {
     await this.setAttr(0x11, [...new TextEncoder().encode(id)]);
     await new Promise((r) => setTimeout(r, 300));
-    const key = await this.fileKey();
-    const parts = [];
-    let offset = 0;
-    for (let guard = 0; guard < 500; guard++) {
-      const chunk = await this.requestChunk(key, offset);
-      if (chunk.offset !== offset) throw new Error(`offset mismatch: asked ${offset}, got ${chunk.offset}`);
-      parts.push(chunk.data);
-      offset += chunk.data.length;
-      onProgress?.(offset);
-      if (chunk.data.length < 2090) break;
-    }
-    const total = parts.reduce((n, p) => n + p.length, 0);
-    const out = new Uint8Array(total);
-    let at = 0;
-    for (const p of parts) { out.set(p, at); at += p.length; }
-    return out;
+    const { bytes } = await this.pullLatest(onProgress);
+    return bytes;
   }
 
   async getInfo() {
@@ -507,6 +531,8 @@ function setState(text, mode) {
     if (pl) pl.disabled = !up;
     const act = document.getElementById("activate");
     if (act) act.disabled = !up;
+    const deact = document.getElementById("deactivate");
+    if (deact) deact.disabled = !up;
   }
 }
 
@@ -588,8 +614,16 @@ btnGain.addEventListener("click", async () => {
 });
 
 btnActivate.addEventListener("click", async () => {
-  try { await client.heartbeat(); await client.activate(); line("note", "activated (attr 0x12=1, 0x0b=1)"); }
+  try { await client.heartbeat(); await client.activate(); line("note", "armed (attr 0x12=1, 0x0b=1)"); }
   catch (e) { line("err", String(e.message || e)); }
+});
+
+document.getElementById("deactivate").addEventListener("click", async () => {
+  try {
+    await client.heartbeat();
+    await client.deactivate();
+    line("note", "released (attr 0x0b=0, attr 0x12=0) — the vendor app can bind again");
+  } catch (e) { line("err", String(e.message || e)); }
 });
 
 btnPull.addEventListener("click", async () => {

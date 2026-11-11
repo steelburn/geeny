@@ -210,40 +210,119 @@ The device swaps src/dst in its replies — e.g. app request
 status blob (81 B):
   01 01 53 | 04 01 18 | 05 01 01 | 06 01 00 | 07 01 00 | 08 01 00 | 09 01 00
   0b 01 01 | 0d 02 01 0e | 15 0c <00 20 75 00> <00 18 75 00> 00 00
-                                        ^ 0x752000   ^ 0x751800  (storage counters)
+                                        ^ total KB  ^ free KB   (attr 0x15)
 
 device name:   00 0f "Boya Notra Neo" 00 40 c0 01 a0 f1 4a
 file request:  11 22 "cf26b00609951044bd8ea93e8268ea0dbe"     (attr 0x11 = file id, 34-char ASCII)
 ```
 
-### File transfer — chunk protocol
+### File transfer — corrected model
 
-Container is **Ogg Opus, mono, 16 kHz** (`OpusHead` at offset 28, serial `75bbf86c`),
-page size ~2.7 KB — so file chunks cut across Ogg page boundaries.
+Container is **Ogg Opus, mono, 16 kHz**. Work unit is a **chunk of 2090 bytes**.
 
-Work unit is a **chunk of 2090 bytes**; host requests, device answers, host acks per fragment:
+File traffic is **not raw bytes**: every message is a normal `0x55` frame with
+`flags = 0x10` (host request) / `0x11` (device response) on **channel `0x8007`**,
+whose payload is:
 
 ```
-device chunk response (0x11, channel 0780):
-  aa <crc32 4B> 82 3408 <seq u32> <offset u32> <len u16> <data> <crc16 2B>
-                      ^seq 0,1,2…  ^0,2090,4180,6270…  ^2090 (last: 563)
-
-host request / ack (0x12 / 0x10, same channel):
-  aa <crc32> 82 08 00 <file key u32> <offset u32> <crc16>
-  aa <crc32> 86 02 00 <…> <crc16>
+aa | crc32(body) u32le | type | len u16le | body | crc16
 ```
 
-A 2090-byte chunk arrives as ~5 ATT notifications of 460 data bytes each
-(18-byte chunk header repeated per notification), each followed by a host ack.
+`len` counts the body only. Types (host → device unless marked):
 
-Measured: a 14-second recording = 15 chunks + short tail = **31,913 bytes**
-(2.28 KB/s ≈ 18 kbit/s Opus).
+```
+86 02 00 e7 03            poll for the pending take (sent every ~3 s while idle)
+86 0c 00 <key u32> <u32> <u32>          device: current file key (0x86 response)
+90 01 00 01                             device: nothing pending
+81 04 00 <key u32>        open the take
+81 18 00 <hash 16B> <size u32> <chunks u32>   device: file metadata
+82 08 00 <key u32> <offset u32>         request the stream from this offset
+82 34 08 <seq u32> <offset u32> <len u16> <data>   device: one chunk
+84 04 00 <key u32>                      device: transfer complete
+85 04 00 <key u32>        host ack of completion (device echoes it)
+```
 
-> **Caveat:** the Android snoop buffer drops packets during the bulk phase — only ~23 % of the
-> body was logged (7,360 of 31,913 bytes), while every control frame was captured. That is a
-> limitation of logging, not of the protocol: a client reads the stream directly and never
-> needs the log. For a *clean* body capture, use a short (<5 s) recording, or request the
-> device's own Wi-Fi path.
+**The device streams**: one `82` request is enough — it sends every chunk back to
+back and then `84`. Re-requesting per chunk makes it re-serve the tail (chunks for
+offset 20900 came back while 4180 was outstanding). Read the stream to completion,
+bucket chunks by offset, then send `85`.
+
+Nothing arrives before a take exists: the key is only offered for a recording the
+device considers unsynced, and it disappears once a transfer has been acked.
+
+Measured: a 14-second recording = 15 chunks = **31,913 bytes** (2.28 KB/s ≈ 18 kbit/s);
+a 28.6-second recording = 22,511 bytes, verified `OggS` end to end.
+
+> **Caveat:** the Android snoop buffer drops packets during the bulk phase, so only the
+> control frames in a capture are complete. A client reads the stream directly and never
+> needs the log.
+
+### Record control — just transfer mode
+
+Verified on hardware 2026-11-11 with the device's LED watched:
+
+```
+attr 0x16 = 02     start a take, hold the red light
+attr 0x16 = 00     stop
+```
+
+Nothing else is required or wanted. A pure cycle (`0x16=2 … 0x16=0`) recorded a take
+whose length matched the hold, and a 15 s hold produced a 43.5 s take that kept growing
+while we stayed connected.
+
+**The vendor's extra writes cancel a take.** The app writes `0x13` (context, state 04),
+`0x11` (file id), `0x17 = 1` at *connect*, then `0x16 = 2`, `ch 8008 81 01 00 01`
+(record), `ch 8008 80 01 00 01` (key). Sending those registration writes or the channel
+`0x8008` pair immediately after the start makes the LED blink once and nothing records —
+which is exactly the failure mode we chased for hours. Channel-`0x8008` payloads also
+need a CRC16 (`81010001 b83c`, `80010001 b9c0`); without it the device ignores them.
+
+Note on the client: the "publish a take" fallback that cycles `0x16` must be suppressed
+while a take is running, or pulling stops the recording.
+
+Observation, not yet explained: the device kept offering older ~10.5 kB takes on repeated
+pulls instead of the newest one, as if a take is only retired after the vendor app's cloud
+sync rather than our `85` ack.
+
+### Settings and status table (channel `0x0021`)
+
+Reading `00 00 00` on channel `0x0021` returns the device's own settings/status table as
+TLV. Mappings below marked *verified* were confirmed by watching the vendor app under HCI
+snoop and cross-checking its own display:
+
+| attr | meaning | evidence |
+|---|---|---|
+| `0x01` | battery, percent | *verified* — `0x47` = 71 %, same number the app shows |
+| `0x04` | mic gain, dB | *verified* — `0x18` = 24 dB; app writes it from its Mic Gain slider |
+| `0x05` | noise reduction, 1/0 | *verified* — snoop shows `0x05=00` at 22:06:11 then `01` at 22:06:32 while the app's toggle moved |
+| `0x0b` | session / release flag | 0 hands the device back to the vendor app |
+| `0x0d` | 2 bytes (`01 0e`) | unknown |
+| `0x15` | storage: **total KB, then free KB** (u32 LE each), 2 reserved bytes | *decoded from captures* — total held at 7,675,904 KB while free fell `7,673,856 → 7,673,792` KB as takes were recorded; 7.68 GB decimal matches the advertised 8 GB |
+| `0x16` | record / transfer mode | 2 starts a take, 0 stops |
+| `0x21` | cloud endpoint string | vendor app writes `100.51.32.75:8080` at connect |
+| `0x28` | 0/1, meaning unknown | toggles with page state |
+
+**VCS gain is still unmapped.** The vendor app exposes it as a Low/Medium/High slider, but:
+its page writes nothing when opened, injected taps/swipes/motion events do not move the
+slider (custom gesture handling), and writing candidates (`0x06..0x09`) is not reflected in
+what the app displays. `0x08` and `0x09` *are* writable and mirrored — `0x08=02` set both —
+but the app still reported "Medium", so neither is VCS.
+
+To finish it: drive the real slider by hand once with snooping on, or run the app on a
+phone rather than this tablet's desktop window. The app deliberately does not guess: it
+writes a candidate, re-reads this table, keeps the change only if the device reflected it,
+and otherwise restores the old value and says the firmware refused.
+
+### Payload integrity
+
+Every file payload carries two checksums, both verified before use:
+
+```
+aa | crc32(body) u32le | type | len u16le | body | crc16(payload up to here)
+```
+
+Frames that fail either one are dropped and counted (`corruptFrames`), never written into
+the audio. The 17-byte frame envelope has its own 8-bit sum, checked by the assembler.
 
 ### Round trip verified
 

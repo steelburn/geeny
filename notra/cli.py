@@ -72,6 +72,36 @@ async def _cmd_raw(args) -> int:
     return 0
 
 
+def _cmd_transcribe(args) -> int:
+    from . import ai
+
+    transcript = ai.transcribe(args.path, model_size=args.model)
+    if not transcript.segments:
+        print("no speech detected")
+        return 1
+    print(f"{transcript.language} ({transcript.language_probability:.2f}) "
+          f"{transcript.duration:.1f}s  {len(transcript.text.split())} words")
+    for seg in transcript.segments:
+        print(f"  [{seg.start:6.2f} -> {seg.end:6.2f}] {seg.text}")
+    if args.save:
+        summary = ai.summarize(transcript, template=args.template)
+        j, m = ai.save(transcript, summary)
+        print(f"saved {j} and {m}")
+    return 0
+
+
+def _cmd_summary(args) -> int:
+    from . import ai
+
+    transcript = ai.transcribe(args.path, model_size=args.model)
+    summary = ai.summarize(transcript, template=args.template)
+    print(ai.to_markdown(transcript, summary))
+    if args.save:
+        j, m = ai.save(transcript, summary)
+        print(f"saved {j} and {m}")
+    return 0
+
+
 def _cmd_frames(args) -> int:
     t = ReplayTransport(args.path)
     shown = 0
@@ -140,6 +170,20 @@ def main(argv: list[str] | None = None) -> int:
     fp.add_argument("--limit", type=int, default=40)
     fp.add_argument("--verbose", action="store_true")
     fp.set_defaults(fn=_cmd_frames)
+
+    tr = sub.add_parser("transcribe", help="transcribe a take (needs faster-whisper)")
+    tr.add_argument("path")
+    tr.add_argument("--model", default="base", help="whisper model size (tiny/base/small/medium)")
+    tr.add_argument("--save", action="store_true", help="also write .json and .md next to the take")
+    tr.add_argument("--template", default="plain", choices=["plain", "meeting", "lecture"])
+    tr.set_defaults(fn=_cmd_transcribe)
+
+    sm = sub.add_parser("summary", help="transcribe and summarise a take")
+    sm.add_argument("path")
+    sm.add_argument("--model", default="base")
+    sm.add_argument("--template", default="meeting", choices=["plain", "meeting", "lecture"])
+    sm.add_argument("--save", action="store_true")
+    sm.set_defaults(fn=_cmd_summary)
 
     st = sub.add_parser("selftest", help="validate every frame in a capture")
     st.add_argument("path")

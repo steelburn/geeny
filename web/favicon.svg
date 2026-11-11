@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <!-- Notra: forest stock, paper mic, one sage recording light. -->
+  <rect width="108" height="108" rx="23.76" fill="#175C44"/>
+  <circle cx="78.3" cy="31.86" r="3.02" fill="#E3EDE7"/>
+  <path d="M54,21.6 A8.1,8.1 0 0 1 62.1,29.7 L62.1,48.06 A8.1,8.1 0 0 1 45.9,48.06 L45.9,29.7 A8.1,8.1 0 0 1 54,21.6 Z" fill="#F5F3ED"/>
+  <path d="M35.1,54 A18.9,18.9 0 0 1 72.9,54" fill="none" stroke="#F5F3ED" stroke-width="4.86" stroke-linecap="round"/>
+  <path d="M54,72.9 L54,80.46" fill="none"
+        stroke="#F5F3ED" stroke-width="4.86" stroke-linecap="round"/>
+  <path d="M43.2,84.24 L64.8,84.24" fill="none"
+        stroke="#F5F3ED" stroke-width="4.86" stroke-linecap="round"/>
+</svg>
