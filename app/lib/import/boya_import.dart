@@ -56,6 +56,69 @@ class ImportedNote {
       );
 }
 
+// --- naming ----------------------------------------------------------------
+
+/// Words Boya OS (and a file manager) put after a name: what the file holds, or
+/// that it is a second copy.
+const _suffixWords = [
+  'recording',
+  'record',
+  'audio',
+  'transcript',
+  'transcription',
+  'summary',
+  'notes',
+  'note',
+  'copy',
+];
+
+final _kindSuffix = RegExp(
+  r'[\s._\-–—]*[\(\[]?\s*(?:' + _suffixWords.join('|') + r')\s*[\)\]]?\s*$',
+  caseSensitive: false,
+);
+
+/// Geeny's own decoration on a stored import: `boya-<name>-2026-11-11T0908.mp3`
+/// and `imported-<name>-2026-11-11T0908.ogg`.
+final _storedPrefix = RegExp(r'^(?:boya|imported)-', caseSensitive: false);
+final _storedStamp = RegExp(r'-\d{4}-\d{2}-\d{2}T\d{4,6}$');
+
+/// A copy marker the system adds to a second export of the same name: `(1)`.
+final _copyMarker = RegExp(r'[\s._\-–—]*[\(\[]\s*\d{1,3}\s*[\)\]]\s*$');
+
+/// The key that three exports of one meeting share.
+///
+/// Boya OS names every export after the recording and puts the kind in a suffix:
+/// `Sampling walk (Recording).ogg`, `Sampling walk (Transcript).txt`,
+/// `Sampling walk - Summary.md`. The extension differs as well, and Geeny stores
+/// an import under its own `boya-…`/`imported-…` name with a timestamp. All of
+/// that is stripped here, so a recording and its transcript compare equal and
+/// the import can attach one to the other instead of making a second take.
+///
+/// The result is lower case with runs of punctuation folded to single spaces.
+/// An empty result means the name carried nothing but a kind word (`Recording`,
+/// `Transcript`): it is never used for matching, so two such files are not
+/// forced into one group without a name to go on.
+String exportGroupKey(String fileName) {
+  final base = _withoutExtension(fileName.split(RegExp(r'[\\/]')).last);
+  var key = base.replaceFirst(_storedPrefix, '').replaceFirst(_storedStamp, '');
+  // A name can carry more than one suffix (`… transcript (1)`, `… summary copy`).
+  var previous = '';
+  while (key != previous) {
+    previous = key;
+    key = key.replaceFirst(_copyMarker, '');
+    key = key.replaceFirst(_kindSuffix, '');
+  }
+  return _slug(key);
+}
+
+String _slug(String value) =>
+    value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+
+String _withoutExtension(String name) {
+  final dot = name.lastIndexOf('.');
+  return dot > 0 ? name.substring(0, dot) : name;
+}
+
 /// Read an export by extension, falling back to sniffing the content.
 ImportedNote? parseExport(String content, {String sourceName = ''}) {
   final text = content.replaceFirst('\uFEFF', '').trim();
@@ -315,8 +378,5 @@ ImportedNote parseTextExport(String content, String fallbackTitle) {
   return note;
 }
 
-String _titleFromName(String name) {
-  final base = name.split(RegExp(r'[\\/]')).last;
-  final dot = base.lastIndexOf('.');
-  return (dot > 0 ? base.substring(0, dot) : base).trim();
-}
+String _titleFromName(String name) =>
+    _withoutExtension(name.split(RegExp(r'[\\/]')).last).trim();

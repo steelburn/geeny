@@ -41,13 +41,31 @@ web console (`DESIGN.md`), same frame codec, same CRC tables.
 
 ```bash
 cd app
-flutter test                     # 34 tests: codec, CRCs, session flow, notes, storage
+flutter test                     # 96 tests: codec, CRCs, session flow, notes, on-device AI
 flutter build apk --debug        # -> build/app/outputs/flutter-apk/app-debug.apk
+flutter build apk --release --split-per-abi   # one APK per ABI, for a real install
 adb install -r build/app/outputs/flutter-apk/app-debug.apk
 ```
 
+The offline AI adds native runtimes (sherpa-onnx, llama.cpp) to every ABI, so a debug APK
+that carries three architectures is ~450 MB; a release build split per ABI is ~120 MB for
+arm64. Model weights are not bundled — they are downloaded on first use, into the app's own
+support directory.
+
 The Android package id is `dev.geeny.app` (Dart package `geeny_app`); the launcher label is
 **Geeny**.
+
+**Playing a take** opens a player inside that take's own row: the play button becomes
+pause, the row tints and grows a seek slider with `position / length` and a stop (✕). Other
+rows stay compact, so it is always obvious which recording is playing — there is no separate
+bar above the list. Dragging the slider seeks on release, so the thumb does not fight the
+position stream. The notes sheet shows the same scrubber in a compact bar while *its own* take
+is the one loaded. Lengths are read from the Ogg granule (48 kHz, per RFC 7845), which is what
+the recorder writes.
+
+**Saving a take** is the `Save or share audio` action (or `Save audio` in the notes sheet): a
+copy named after the take's title goes to the Android share sheet — Files, Drive, another
+app. The recording in the library is never moved or renamed.
 
 It scans and connects (no pairing), sends the heartbeat every 4 s so commands are accepted,
 shows the device's battery (`attr 0x01`), toggles noise reduction (`attr 0x05`) and mic gain
@@ -67,7 +85,47 @@ counted, never written into the audio.
 ## Transcription and summaries
 
 Boya OS does this in its cloud (Azure Speech + a server-side LLM, metered in minutes) — see
-`research/VENDOR_AI.md`. This project keeps it on your own machine instead:
+`research/VENDOR_AI.md`. This project keeps it on hardware you own instead, and each half
+(speech, summary) is routed independently:
+
+| Where it runs | What it needs | Quality | Offline |
+|---|---|---|---|
+| **On this device** — the phone/tablet | one model download inside the app | whisper `tiny`/`base`/`small`; 0.5B/1.5B summaries, or extractive | yes |
+| **On this machine** — a PC beside you | the Python service below | whisper up to `medium`; 3B/7B summaries | yes |
+| **External service** | an OpenAI-compatible key | whatever you pay for | no |
+
+### On the device — no service, no network
+
+Setup → **Speech → On this device** picks a whisper size; **Summary → On this device** picks a
+GGUF or `extractive`. A model that is not installed shows its size and downloads into the app
+with a progress line when tapped (116 MB–1.9 GB; the panel and **Models** both show what is on
+disk and free it again). Nothing here talks to a service: the take is decoded by the platform's
+own codecs (MediaCodec/AVFoundation), whisper runs through sherpa-onnx, and summaries run
+through llama.cpp — both inside the app, in their own isolates.
+
+Measured on the Lenovo tablet (Android 16, 8 GB): a 17 s Ogg Opus take transcribes in **~9 s**
+with `whisper tiny`, and a 0.5B GGUF writes the three-section summary in **~20 s**, with the
+title on top. Offline whisper is the one setting that works on a train, and the only one that
+survives the PC being asleep.
+
+`extractive` needs no download at all — real sentences from the transcript, ranked into the
+template — so **Summary → On this device** is useful before any model is installed.
+
+Verify the whole path on a real device (the media is served from the PC over `adb reverse`, so
+the test needs no tablet network):
+
+```bash
+mkdir -p /tmp/geeny-test && cd /tmp/geeny-test
+curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2
+curl -L -o qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+uv run --with soundfile --with numpy python scripts/make_test_clip.py take-test.ogg
+python -m http.server 8899 --directory /tmp/geeny-test &
+adb reverse tcp:8899 tcp:8899
+flutter test integration_test/device_pipeline_test.dart -d <device>
+```
+
+### On this machine — the service
 
 ```bash
 # one-time: a dedicated env, because the local LLM needs a prebuilt wheel
@@ -98,10 +156,13 @@ Summaries come from the chosen local GGUF (`llama.cpp · qwen2.5-3b`) when prese
 local OpenAI-compatible server if one is running, and only then the extractive fallback —
 `GET /health` reports which. Set `NOTRA_LLM_MODEL` to use a different GGUF.
 
-**Speech and summary are routed independently.** Each half is either *on this machine* or an
-*external service*, so local whisper + an external summary model (or the reverse) is a normal
-setup:
+**Speech and summary are routed independently.** Each half is *on this device*, *on this
+machine* or an *external service*, so on-device whisper + the machine's 7B summary (or the
+reverse) is a normal setup:
 
+- **On this device** — whisper `tiny/base/small` for speech and 0.5B/1.5B summaries (or
+  `extractive`) on the phone itself. No service, no network; see above. Slower than a PC and
+  with a smaller summary model.
 - **On this machine** — whisper `tiny/base/small/medium` for speech; any GGUF in
   `~/.cache/notra/models/` for summaries (or `extractive`, or the service default). Larger
   whisper sizes are slower but handle accents and code-switching better.
@@ -111,15 +172,31 @@ setup:
   transcripts go there and are billed by it; the key lives in the app's preferences, not a
   system keystore.
 
+Each half shows only its own settings, and the line under the pickers is the routing in
+plain words (`on device · whisper base  ·  on this machine · qwen2.5-3b`). **Test connection**
+checks only the halves in use — the on-device one is a file check, so it passes with no
+network at all.
+
 There is **no local-service-URL field**. The app owns that address: it uses the built-in
 default `http://127.0.0.1:8765` (or `--dart-define=NOTRA_AI_URL=http://192.168.1.20:8765` at
 build time) and probes the usual candidates on first use, remembering whichever answers
 `/health`. `adb reverse` is still enough on USB, and a LAN address needs no typing.
 
-Tap the notes icon on any take in the app: it posts the `.ogg` to that service (or the
-external API), shows the transcript with timestamps (tap a line to seek the player) and a
-template summary (meeting / lecture / notes). No account, no upload to a vendor unless you
-chose an external service.
+Tap the notes icon on any take: the app transcribes and summarises it with whichever halves
+you chose, shows the transcript with timestamps (tap a line to seek the player) and a
+template summary (meeting / lecture / notes). A take with **no transcript yet** asks which
+kind of summary it is **before the first run**, so the one transcription pass also produces
+the summary you wanted rather than a meeting one you then redo. The type you pick is
+remembered, so the next take opens on it. No account, no upload unless you chose an
+external service.
+
+**Languages are declared before transcription.** The same first-run panel (and Setup →
+Speech) has a multi-select of whisper's languages, so a take that mixes German and English
+never has to rely on a guess from a short, noisy opening. One language is forced; with more
+than one, whisper still detects across the take and the first one you picked is only forced
+when that guess lands outside the list — a second pass, and only then. The selection is kept
+in app preferences, so it is answered once and not again on the next take or the next
+session. **Redo** re-transcribes with whatever is selected at that moment.
 
 **Nothing is transcribed or summarised twice.** Transcripts and summaries are written next to
 the take as `<take>.ogg.notes.json` and restored on launch. Opening a take that already has a
@@ -170,10 +247,25 @@ only the six best-matching passages, with `[n]` citations back to the take and t
 No model installed? The matching passages themselves are shown and labelled *extractive* —
 nothing is invented either way.
 
-The app pushes the text it already has (transcripts + summaries) to the service, which keeps
-an in-memory index; the audio never leaves the device and neither does the text. Search is
-purely local, so it also works when both AI halves are routed externally — but not when the
-service is down.
+Search runs **on the phone**: the app builds the BM25 index over the transcripts and
+summaries it already has (`app/lib/ai/search_index.dart`, a port of `notra/search.py`), so
+looking something up never needs the service, the network or a model. The audio is never
+indexed and nothing is uploaded.
+
+Ask uses the same retrieval and borrows a model only for the prose, from whichever is there:
+
+1. **On this device** — the on-device GGUF, when the summary half is the device (or when it
+   is On this machine but no service is connected and a model is installed here).
+2. **A connected service** — the external API when the summary half is External; the
+   machine's `/chat` when it is On this machine, after a 3 s `GET /health` probe.
+3. **No model** — the matching passages are the answer, and the sheet says so (`extractive`).
+
+A service that is not connected costs one short probe, never a connect timeout, and an
+unreachable external API falls through to the on-device model. A rejected API key is still
+reported, not hidden.
+
+The machine's copy of the index is still refreshed in the background, so the service's `/chat`
+and the CLI answer from the same corpus.
 
 ```bash
 python -m notra find "sampling plan" --library path/to/takes
@@ -192,12 +284,18 @@ share target for audio and for transcript files:
 1. In Boya OS: **Share → Geeny** for a recording, or **Export audio** and pick the file.
    Ogg Opus transcribes locally; MP3/M4A play here but need an external speech service.
 2. **Export transcript** as TXT, Markdown or SRT (DOCX and PDF are not readable) and share
-   that too. It is attached to the take with the same name, or kept as a *transcript-only*
-   take when the audio stayed in the cloud — searchable, readable and exportable, just not
-   playable.
+   that too. The kind suffix on the name (`… (Recording).ogg`, `… (Transcript).txt`,
+   `… - Summary.md`) is ignored, so the exports of one meeting become one take: the
+   recording, its transcript and its summary, in whatever order they arrive. A transcript
+   or summary with no recording here is kept as a take of its own — searchable, readable
+   and exportable, just not playable.
 
 The takes header has **Import → Choose a file** for exports that ended up in Downloads.
 Everything lands in the app's own library; nothing is uploaded.
+
+If the suffixes do not line up, **Group** in the takes header does it by hand: pick two or
+three takes of different kinds — a recording, a transcript, a summary — and they become one
+take, with the recording kept as the audio.
 
 ## Housekeeping — models on the serving machine
 

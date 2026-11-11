@@ -1,16 +1,19 @@
 import 'package:flutter/material.dart';
 
 import '../ai/ai_settings.dart';
+import '../ai/device/device_models.dart';
 import '../state/takes.dart';
 import '../theme/tokens.dart';
 
-/// Housekeeping for the machine running the AI service: every downloaded model,
-/// what it takes, and one tap to free it.
+/// Housekeeping for stored models: the machine running the AI service, and this
+/// device when the offline path is set up.
 ///
 /// Two kinds are listed because two kinds exist: summary GGUFs in
 /// `~/.cache/notra/models/` and the whisper weights faster-whisper keeps in the
 /// Hugging Face cache. Both are per-size downloads, so a machine that has tried
-/// four whisper sizes is carrying hundreds of megabytes it may not need.
+/// four whisper sizes is carrying hundreds of megabytes it may not need. The
+/// on-device models are listed the same way, because they are just as easy to
+/// outgrow on a phone.
 class ModelHousekeeping extends StatefulWidget {
   const ModelHousekeeping({super.key, required this.takes});
   final Takes takes;
@@ -27,6 +30,11 @@ class _ModelHousekeepingState extends State<ModelHousekeeping> {
   String? _status;
   String? _deleting;
 
+  // On this device (the offline path), listed separately from the machine.
+  DeviceModels? _deviceStore;
+  List<DeviceModel> _deviceModels = const [];
+  int _deviceTotal = 0;
+
   @override
   void initState() {
     super.initState();
@@ -36,9 +44,18 @@ class _ModelHousekeepingState extends State<ModelHousekeeping> {
   Future<void> _load() async {
     setState(() => _loading = true);
     final storage = await widget.takes.ai.modelStorage();
+    final store = await widget.takes.ai.ensureDeviceModels();
+    final deviceModels = [
+      ...store.installed(ModelKind.speech),
+      ...store.installed(ModelKind.summary),
+    ];
+    final deviceTotal = store.totalBytes;
     if (!mounted) return;
     setState(() {
       _loading = false;
+      _deviceStore = store;
+      _deviceModels = deviceModels;
+      _deviceTotal = deviceTotal;
       if (storage == null) {
         _error = 'The local AI service is not reachable, so its models cannot be listed. '
             'Start scripts/ai_server.py, then refresh.';
@@ -174,15 +191,86 @@ class _ModelHousekeepingState extends State<ModelHousekeeping> {
           const SizedBox(height: Tokens.s2),
           Text(_status!, style: Tokens.caption.copyWith(color: Tokens.ink)),
         ],
+        if (_deviceModels.isNotEmpty) ...[
+          const SizedBox(height: Tokens.s3),
+          Text('On this device', style: Tokens.section),
+          Text(
+            '${_size(_deviceTotal)} in this app — the offline path, used when Speech or '
+            'Summary is set to On this device.',
+            style: Tokens.caption,
+          ),
+          const SizedBox(height: Tokens.s1),
+          const Divider(height: 1),
+          for (final model in _deviceModels) _deviceRow(model),
+        ],
         const SizedBox(height: Tokens.s2),
         Text(
           'Larger models take more space and time. Deleting one frees the space immediately; '
           'it downloads again if you select it later. Summary models and whisper sizes are '
-          'independent, so keeping one of each is all a single setup needs.',
+          'independent, so keeping one of each is all a single setup needs. On-device models '
+          'are downloaded from Setup, under Speech or Summary → On this device.',
           style: Tokens.caption,
         ),
       ],
     );
+  }
+
+  Widget _deviceRow(DeviceModel model) {
+    final store = _deviceStore;
+    final text = model.kind == ModelKind.speech ? 'whisper ${model.label}' : model.label;
+    final bytes = store?.installedBytes(model) ?? 0;
+    return SizedBox(
+      height: Tokens.targetCompact + 4,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Tokens.body.copyWith(fontWeight: FontWeight.w500),
+            ),
+          ),
+          const SizedBox(width: Tokens.s2),
+          Text(_size(bytes), style: Tokens.dataSmall),
+          const SizedBox(width: Tokens.s1),
+          IconButton(
+            onPressed: _deleting != null || store == null ? null : () => _deleteDevice(model),
+            tooltip: 'Delete $text',
+            iconSize: 18,
+            color: Tokens.danger,
+            disabledColor: Tokens.inkSoft.withValues(alpha: 0.4),
+            constraints: const BoxConstraints(
+              minWidth: Tokens.targetCompact,
+              minHeight: Tokens.targetCompact,
+            ),
+            icon: const Icon(Icons.delete_outline),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _deleteDevice(DeviceModel model) async {
+    final store = _deviceStore;
+    if (store == null) return;
+    final label = model.kind == ModelKind.speech ? 'whisper ${model.label}' : model.label;
+    setState(() => _deleting = 'device:${model.id}');
+    final freed = await store.delete(model);
+    final settings = widget.takes.aiSettings;
+    if (model.kind == ModelKind.summary && settings.deviceSummary == model.id) {
+      settings.setDeviceSummary('extractive');
+    }
+    if (model.kind == ModelKind.speech && settings.deviceSpeech == model.label) {
+      final left = store.installed(ModelKind.speech);
+      if (left.isNotEmpty) settings.setDeviceSpeech(left.first.label);
+    }
+    await _load();
+    if (!mounted) return;
+    setState(() {
+      _deleting = null;
+      _status = '$label deleted — ${_size(freed)} freed on this device.';
+    });
   }
 
   Widget _row(Map<String, dynamic> model, {String? label}) {

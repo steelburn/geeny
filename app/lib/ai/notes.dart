@@ -192,6 +192,116 @@ NotesAction notesAction({
   return NotesAction.summarizeOnly;
 }
 
+/// One set of notes made out of several.
+///
+/// A recording, its transcript and its summary arrive from Boya OS as separate
+/// files, and a person can pick them by hand with Group. After either, they are
+/// one take with one sidecar. The first part that has a transcript supplies it —
+/// two transcripts of one meeting have the same words, and appending one to the
+/// other would read as doubled speech. Summaries are merged bullet by bullet:
+/// a heading the notes already have gains only the bullets they are missing, and
+/// a heading they do not have is added in the order it arrives.
+TakeNotes combineNotes(String path, Iterable<TakeNotes?> parts) {
+  final list = parts.whereType<TakeNotes>().toList();
+  final withTranscript = list.where((n) => n.hasTranscript);
+  final transcript = withTranscript.isEmpty ? null : withTranscript.first;
+  final withSummary = list.where((n) => n.hasSummary && n.summary != null);
+  final summarySource = withSummary.isEmpty ? null : withSummary.first;
+  final summary = _combinedSummary([
+    for (final n in withSummary) n.summary!,
+  ]);
+  return TakeNotes(
+    path: path,
+    language: transcript?.language ?? (list.isEmpty ? '' : list.first.language),
+    duration: list.fold<double>(0, (longest, n) => n.duration > longest ? n.duration : longest),
+    segments: [...?transcript?.segments],
+    summary: summary,
+    template: summarySource?.template ?? (list.isEmpty ? 'meeting' : list.first.template),
+    engine: transcript?.engine ?? summarySource?.engine ?? (list.isEmpty ? '' : list.first.engine),
+  );
+}
+
+/// The first summary's shape (template, engine) with every section filled in.
+Map<String, dynamic>? _combinedSummary(List<Map<String, dynamic>> summaries) {
+  if (summaries.isEmpty) return null;
+  final out = Map<String, dynamic>.from(summaries.first);
+  final sections = <String, List<String>>{};
+  for (final summary in summaries) {
+    final raw = summary['sections'];
+    if (raw is! Map) continue;
+    for (final entry in raw.entries) {
+      final heading = entry.key.toString();
+      final bullets = sections.putIfAbsent(heading, () => <String>[]);
+      final values = entry.value is Iterable ? entry.value as Iterable : [entry.value];
+      for (final value in values) {
+        final text = value?.toString().trim() ?? '';
+        if (text.isEmpty) continue;
+        if (bullets.any((kept) => kept.toLowerCase() == text.toLowerCase())) continue;
+        bullets.add(text);
+      }
+    }
+  }
+  sections.removeWhere((_, bullets) => bullets.isEmpty);
+  if (sections.isEmpty) return null;
+  return {...out, 'sections': sections};
+}
+
+/// Things a model says when it has not written a title.
+const Set<String> _notTitles = {
+  'null',
+  'none',
+  'nil',
+  'n/a',
+  'na',
+  'untitled',
+  'unknown',
+  'no title',
+  'title',
+  '-',
+  '--',
+  '...',
+  '…',
+};
+
+/// A usable take title, or null when the model did not really give one.
+///
+/// Transcription titles come from a chat model, and small or careless models
+/// answer `null`, `Untitled`, a quoted sentence, a fenced block or a JSON object.
+/// None of those belong in the library: a take without a title shows its date,
+/// which is honest, and the row keeps offering the edit affordance. Everything
+/// that turns a model's reply into a title goes through here.
+String? cleanTitle(String? raw) {
+  if (raw == null) return null;
+  var value = raw.trim();
+
+  // Fenced code, quotes, emphasis and list markers around the title. The
+  // apostrophe is written as \x27 so the pattern can live in a raw string. Trim
+  // after the fences go, so a fenced title does not start with an empty line.
+  value = value.replaceAll(RegExp(r'```[a-zA-Z]*'), '').trim();
+  value = value.split(RegExp(r'[\r\n]+')).first.trim();
+  value = value.replaceAll(RegExp(r'^[\s\x27"`*_#>\-–—]+'), '');
+  value = value.replaceAll(RegExp(r'[\s\x27"`*_]+$'), '');
+  value = value.replaceAll(RegExp(r'[.,:;\-–—]+$'), '').trim();
+
+  if (value.isEmpty) return null;
+  final lower = value.toLowerCase();
+  if (_notTitles.contains(lower)) return null;
+  // A refusal or an explanation is not a name for the recording.
+  if (lower.startsWith('as an ai') ||
+      lower.startsWith('i cannot') ||
+      lower.startsWith('i can’t') ||
+      lower.startsWith('sorry')) {
+    return null;
+  }
+  // JSON or a quoted explanation means the model missed the instruction.
+  if (value.startsWith('{') || value.startsWith('[') || value.endsWith('}')) return null;
+  // A long reply is prose, not a title.
+  if (value.split(RegExp(r'\s+')).length > 12) return null;
+
+  if (value.length > 80) value = '${value.substring(0, 80).trimRight()}…';
+  return value;
+}
+
 class NoteSegment {
   NoteSegment(this.start, this.end, this.text, [this.speaker]);
   final double start;

@@ -100,6 +100,9 @@ def main() -> int:
         check("extractive engine is named", result["engine"].startswith("extractive"))
         check("sources keep the take id", result["sources"][0]["id"] == "a.ogg",
               str(result["sources"][:1]))
+        check("the cited list and the source flags agree",
+              [i + 1 for i, h in enumerate(result["sources"]) if h.get("cited")] == result["cited"],
+              str([(i + 1, h.get("cited")) for i, h in enumerate(result["sources"])]))
         empty = search.build_answer("nothing at all", [])
         check("no sources -> no answer", empty["answer"] == "" and empty["engine"] == "none")
     finally:

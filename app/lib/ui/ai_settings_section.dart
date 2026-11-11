@@ -3,13 +3,18 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../ai/ai_settings.dart';
+import '../ai/device/device_models.dart';
+import '../ai/languages.dart';
 import '../state/takes.dart';
 import '../theme/tokens.dart';
 import 'choice_chip.dart';
+import 'language_picker.dart';
 
-/// Transcription settings. Speech and summary are routed **independently**, so
-/// local whisper + an external chat model (or the other way round) is a normal
-/// setup. The local service address is not edited here: the app knows it.
+/// Transcription settings. Speech and summary are routed **independently** across
+/// three backends — on this device, on this machine (the AI service) or an
+/// external service — so on-device whisper with the machine's big summary model
+/// (or the other way round) is a normal setup. The local service address is not
+/// edited here: the app knows it.
 class AiSettingsSection extends StatefulWidget {
   const AiSettingsSection({super.key, required this.takes});
   final Takes takes;
@@ -35,6 +40,12 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
   int _received = 0;
   int _total = 0;
   int _modelsSeen = 0;
+
+  // On-device models: the store (for progress and deletion) and the one
+  // download that may be running.
+  DeviceModels? _deviceStore;
+  String? _deviceDownload;
+  Timer? _deviceTimer;
 
   @override
   void initState() {
@@ -65,9 +76,15 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
       h = await widget.takes.ai.health();
       if (!mounted) return;
     }
+    // Resolving the device health is also what opens the model store, so the
+    // pickers below can read installed state synchronously.
+    await widget.takes.ai.deviceHealth();
+    final store = widget.takes.ai.device.modelsIfReady;
+    if (!mounted) return;
     setState(() {
       _healthLoaded = true;
       _healthOk = h != null;
+      _deviceStore = store;
       _applyHealth(h);
     });
   }
@@ -84,6 +101,7 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
   void dispose() {
     widget.takes.removeListener(_onTakesChanged);
     _poll?.cancel();
+    _deviceTimer?.cancel();
     for (final c in [_extUrl, _key, _extSpeech, _extSummary]) {
       c.dispose();
     }
@@ -107,14 +125,78 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
     await _save();
     final problem = await widget.takes.probeAi();
     final h = await widget.takes.ai.health();
+    await widget.takes.ai.deviceHealth();
     if (!mounted) return;
     setState(() {
       _testing = false;
       _healthLoaded = true;
       _healthOk = h != null;
+      _deviceStore = widget.takes.ai.device.modelsIfReady;
       _applyHealth(h);
-      _status = problem ?? 'Reachable — ${s.speechLabel}; ${s.summaryLabel}';
+      _status = problem ?? 'Ready — ${s.speechLabel}; ${s.summaryLabel}';
     });
+  }
+
+  // --- on-device models -----------------------------------------------------
+
+  Future<void> _downloadDevice(DeviceModel model) async {
+    final store = await widget.takes.ai.ensureDeviceModels();
+    if (!mounted) return;
+    setState(() {
+      _deviceStore = store;
+      _deviceDownload = model.id;
+      _status = null;
+    });
+    unawaited(store.download(model));
+    _deviceTimer?.cancel();
+    _deviceTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final progress = store.progressOf(model);
+      setState(() {});
+      if (progress == null || !progress.finished) return;
+      timer.cancel();
+      if (progress.state == 'done') {
+        // A model you just downloaded is the one you meant to use.
+        if (model.kind == ModelKind.speech) {
+          s.setDeviceSpeech(model.label);
+        } else {
+          s.setDeviceSummary(model.id);
+        }
+      }
+      await _refreshHealth();
+      if (!mounted) return;
+      setState(() {
+        _deviceDownload = null;
+        _status = progress.state == 'done'
+            ? '${model.label} is on this device.'
+            : progress.state == 'error'
+                ? 'Download failed: ${progress.error ?? 'unknown error'}'
+                : 'Download cancelled.';
+      });
+    });
+  }
+
+  void _cancelDeviceDownload(DeviceModel model) {
+    _deviceStore?.cancel(model);
+  }
+
+  Future<void> _deleteDevice(DeviceModel model) async {
+    final store = await widget.takes.ai.ensureDeviceModels();
+    final freed = await store.delete(model);
+    if (model.kind == ModelKind.speech && s.deviceSpeech == model.label) {
+      final left = store.installed(ModelKind.speech);
+      if (left.isNotEmpty) s.setDeviceSpeech(left.first.label);
+    }
+    if (model.kind == ModelKind.summary && s.deviceSummary == model.id) {
+      s.setDeviceSummary('auto');
+    }
+    await _refreshHealth();
+    if (!mounted) return;
+    setState(() => _status =
+        '${DeviceModel.sizeLabel(freed)} freed on this device.');
   }
 
   // --- catalog downloads ----------------------------------------------------
@@ -190,13 +272,21 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
 
   @override
   Widget build(BuildContext context) {
+    final primary = s.speechLanguages.isEmpty
+        ? ''
+        : SpeechLanguages.nameOf(s.speechLanguages.first) ?? s.speechLanguages.first;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _Route(
           title: 'Speech',
           detail: 'Turns the recording into text.',
-          local: !s.speechExternal,
+          backend: s.speechBackend,
+          onDevice: () {
+            s.setSpeechBackend(AiBackend.device);
+            setState(() => _status = null);
+            widget.takes.ai.ensureDeviceModels().then((_) => _refreshHealth());
+          },
           onLocal: () {
             s.setSpeechBackend(AiBackend.local);
             setState(() => _status = null);
@@ -208,14 +298,44 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
           },
         ),
         const SizedBox(height: Tokens.s2),
-        if (!s.speechExternal) ..._localSpeech() else ..._externalSpeech(),
+        if (s.speechOnDevice)
+          ..._deviceSpeech()
+        else if (!s.speechExternal)
+          ..._localSpeech()
+        else
+          ..._externalSpeech(),
+        const SizedBox(height: Tokens.s3),
+        Text('Languages in the recording', style: Tokens.body),
+        const SizedBox(height: Tokens.s1),
+        LanguagePicker(
+          selected: s.speechLanguages,
+          onChanged: (v) => setState(() {
+            s.setSpeechLanguages(v);
+            _status = null;
+          }),
+        ),
+        const SizedBox(height: Tokens.s1),
+        Text(
+          s.speechLanguages.isEmpty
+              ? 'Auto: whisper detects the language. Narrow it when takes are short or mix '
+                  'languages — a known language is one whisper does not have to guess.'
+              : 'Asked before a take is transcribed, and remembered across sessions. With more '
+                  'than one, whisper detects and $primary is only forced when the guess lands '
+                  'outside the list.',
+          style: Tokens.caption,
+        ),
         const SizedBox(height: Tokens.s4),
         const Divider(height: 1),
         const SizedBox(height: Tokens.s4),
         _Route(
           title: 'Summary',
           detail: 'Writes the notes and the take title.',
-          local: !s.summaryExternal,
+          backend: s.summaryBackend,
+          onDevice: () {
+            s.setSummaryBackend(AiBackend.device);
+            setState(() => _status = null);
+            widget.takes.ai.ensureDeviceModels().then((_) => _refreshHealth());
+          },
           onLocal: () {
             s.setSummaryBackend(AiBackend.local);
             setState(() => _status = null);
@@ -227,7 +347,12 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
           },
         ),
         const SizedBox(height: Tokens.s2),
-        if (!s.summaryExternal) ..._localSummary() else ..._externalSummary(),
+        if (s.summaryOnDevice)
+          ..._deviceSummary()
+        else if (!s.summaryExternal)
+          ..._localSummary()
+        else
+          ..._externalSummary(),
         const SizedBox(height: Tokens.s4),
         Row(
           children: [
@@ -251,6 +376,176 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
         ),
       ],
     );
+  }
+
+  // --- on this device --------------------------------------------------------
+
+  List<Widget> _deviceSpeech() => [
+        const SizedBox(height: Tokens.s1),
+        Text('On this device, with whisper', style: Tokens.body),
+        const SizedBox(height: Tokens.s1),
+        Wrap(
+          spacing: Tokens.s2,
+          runSpacing: Tokens.s2,
+          children: [
+            for (final m in deviceSpeechModels)
+              _deviceChip(
+                m,
+                selected: s.deviceSpeech == m.label,
+                onSelect: () => setState(() {
+                  s.setDeviceSpeech(m.label);
+                  _status = null;
+                }),
+              ),
+          ],
+        ),
+        ..._deviceProgress(ModelKind.speech),
+        const SizedBox(height: Tokens.s1),
+        Text(
+          'Runs on this phone: no service, no network, nothing uploaded. A take is decoded by '
+          'the platform’s own codecs, so it works with the screen off and on a train. Slower '
+          'than a PC — the machine option is still there for long recordings.',
+          style: Tokens.caption,
+        ),
+        ..._installedRows(ModelKind.speech),
+      ];
+
+  List<Widget> _deviceSummary() => [
+        const SizedBox(height: Tokens.s1),
+        Text('On this device, with llama.cpp', style: Tokens.body),
+        const SizedBox(height: Tokens.s1),
+        Wrap(
+          spacing: Tokens.s2,
+          runSpacing: Tokens.s2,
+          children: [
+            for (final m in deviceSummaryModels)
+              _deviceChip(
+                m,
+                selected: s.deviceSummary == m.id,
+                onSelect: () => setState(() {
+                  s.setDeviceSummary(m.id);
+                  _status = null;
+                }),
+              ),
+            ChoiceChipButton(
+              label: 'extractive',
+              selected: s.deviceSummary == 'extractive',
+              onTap: () => setState(() {
+                s.setDeviceSummary('extractive');
+                _status = null;
+              }),
+            ),
+          ],
+        ),
+        ..._deviceProgress(ModelKind.summary),
+        const SizedBox(height: Tokens.s1),
+        Text(
+          s.deviceSummary == 'extractive'
+              ? 'No model: real sentences from the transcript, ranked into the template. '
+                  'Nothing invented, works offline, instant — but it cannot rewrite or merge.'
+              : 'A GGUF stays in this app and writes the notes on the phone. Bigger writes tighter '
+                  'sections and misses fewer actions, and is slower; the machine can carry 3B and 7B.',
+          style: Tokens.caption,
+        ),
+        ..._installedRows(ModelKind.summary),
+      ];
+
+  Widget _deviceChip(DeviceModel model,
+      {required bool selected, required VoidCallback onSelect}) {
+    final store = _deviceStore;
+    final installed = store?.isInstalled(model) ?? false;
+    final progress = store?.progressOf(model);
+    final busy = _deviceDownload == model.id && (progress == null || !progress.finished);
+
+    if (busy) {
+      final percent = progress?.fraction;
+      return ChoiceChipButton(
+        label: '${model.label} · ${percent == null ? 'starting…' : '${(percent * 100).round()}%'}',
+        compact: true,
+        selected: false,
+        onTap: () => _cancelDeviceDownload(model),
+      );
+    }
+    if (installed) {
+      return ChoiceChipButton(
+        label: model.label,
+        compact: true,
+        selected: selected,
+        onTap: onSelect,
+      );
+    }
+    return ChoiceChipButton(
+      label: '${model.label} · ${DeviceModel.sizeLabel(model.bytes)}',
+      compact: true,
+      selected: false,
+      icon: Icons.download,
+      onTap: _deviceDownload == null ? () => _downloadDevice(model) : null,
+    );
+  }
+
+  List<Widget> _deviceProgress(ModelKind kind) {
+    final store = _deviceStore;
+    final active = _deviceDownload;
+    if (store == null || active == null) return const [];
+    final model = DeviceModels.byId(active);
+    if (model == null || model.kind != kind) return const [];
+    final progress = store.progressOf(model);
+    if (progress == null || progress.finished) return const [];
+    return [
+      const SizedBox(height: Tokens.s1),
+      ClipRRect(
+        borderRadius: BorderRadius.circular(2),
+        child: LinearProgressIndicator(
+          value: progress.fraction,
+          minHeight: 3,
+          backgroundColor: Tokens.rule,
+          color: Tokens.accent,
+        ),
+      ),
+      const SizedBox(height: Tokens.s1),
+      Text('Downloading ${model.label} — ${progress.label}', style: Tokens.caption),
+    ];
+  }
+
+  /// One row per installed model, with what it takes and one tap to free it.
+  List<Widget> _installedRows(ModelKind kind) {
+    final store = _deviceStore;
+    if (store == null) return const [];
+    final models = store.installed(kind);
+    if (models.isEmpty) {
+      return kind == ModelKind.summary
+          ? const []
+          : [
+              const SizedBox(height: Tokens.s1),
+              Text('No whisper model on this device yet.', style: Tokens.caption),
+            ];
+    }
+    return [
+      const SizedBox(height: Tokens.s1),
+      for (final m in models)
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${kind == ModelKind.speech ? 'whisper ${m.label}' : m.label} · '
+                '${DeviceModel.sizeLabel(store.installedBytes(m))} on this device',
+                style: Tokens.caption,
+              ),
+            ),
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              iconSize: 16,
+              tooltip: 'Delete ${m.label}',
+              onPressed: _deviceDownload == null ? () => _deleteDevice(m) : null,
+              icon: const Icon(Icons.delete_outline, color: Tokens.inkSoft),
+            ),
+          ],
+        ),
+      Text(
+        '${DeviceModel.sizeLabel(store.totalBytes)} used by on-device models.',
+        style: Tokens.caption,
+      ),
+    ];
   }
 
   List<Widget> _localSpeech() => [
@@ -454,19 +749,22 @@ class _AiSettingsSectionState extends State<AiSettingsSection> {
   }
 }
 
-/// One routing decision: speech or summary, local or external.
+/// One routing decision: speech or summary, on this device / this machine /
+/// external.
 class _Route extends StatelessWidget {
   const _Route({
     required this.title,
     required this.detail,
-    required this.local,
+    required this.backend,
+    required this.onDevice,
     required this.onLocal,
     required this.onExternal,
   });
 
   final String title;
   final String detail;
-  final bool local;
+  final AiBackend backend;
+  final VoidCallback onDevice;
   final VoidCallback onLocal;
   final VoidCallback onExternal;
 
@@ -483,15 +781,21 @@ class _Route extends StatelessWidget {
           runSpacing: Tokens.s2,
           children: [
             ChoiceChipButton(
+              label: 'On this device',
+              compact: true,
+              selected: backend == AiBackend.device,
+              onTap: onDevice,
+            ),
+            ChoiceChipButton(
               label: 'On this machine',
               compact: true,
-              selected: local,
+              selected: backend == AiBackend.local,
               onTap: onLocal,
             ),
             ChoiceChipButton(
               label: 'External service',
               compact: true,
-              selected: !local,
+              selected: backend == AiBackend.external,
               onTap: onExternal,
             ),
           ],

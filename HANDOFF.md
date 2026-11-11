@@ -594,3 +594,345 @@ and `python tests/test_frame.py` pass, `ux_audit` green on the shared web styles
 limits: no word-level highlighting inside a search hit; answers are limited to six passages
 (larger libraries are summarised by retrieval, not exhaustive); DOCX/PDF exports are not parsed;
 a transcript-only take cannot be played.
+
+## 19. AI on the device itself (2026-11-11, later)
+
+The user asked for the speech and summary models to run **on the phone**, not only on a PC.
+Speech and summary can now each be routed to one of three backends: **On this device**,
+**On this machine** (the service), **External service**. Nothing else changed shape — the
+on-device engine returns the same JSON as `scripts/ai_server.py`, so sidecars, search,
+titles, the notes sheet and the CLI cannot tell the difference.
+
+### Pieces
+
+| Piece | Path | Notes |
+|---|---|---|
+| `app/lib/ai/device/device_models.dart` | new | catalog, streaming download with progress + cancel, tar.bz2 unpack, delete, byte counts |
+| `app/lib/ai/device/device_asr.dart` | new | sherpa-onnx whisper, isolate entry point |
+| `app/lib/ai/device/device_llm.dart` | new | llamadart (llama.cpp) summaries + titles, JSON-schema constrained |
+| `app/lib/ai/device/device_ai.dart` | new | routing, model choice, isolate jobs, `probe()` / `health()` |
+| `app/lib/ai/device/audio_io.dart` | new | Ogg Opus → 16 kHz mono PCM via `audio_decoder`, WAV parser |
+| `app/lib/ai/device/segments.dart` | new | token timings → timestamped segments |
+| `app/lib/ai/device/extractive.dart` | new | port of `notra/ai.py:summarize_extractive` |
+| `app/lib/ai/ai_settings.dart` | extended | `AiBackend.device`, `deviceSpeech`, `deviceSummary`, labels |
+| `app/lib/ai/ai_client.dart` | extended | routing per half, `deviceHealth()`, injectable engine for tests |
+| `app/lib/ui/ai_settings_section.dart` | extended | third chip per half, model pickers, downloads, delete, storage |
+| `app/lib/ui/models_section.dart` | extended | "On this device" block beside the machine's models |
+| `app/test/device_*`, `app/test/ai_routing_test.dart` | new | 84 tests total (`flutter test`) |
+| `app/integration_test/device_pipeline_test.dart` | new | the real thing, on hardware |
+
+Dependencies: `sherpa_onnx` 2.0.1, `llamadart` 0.19.4, `audio_decoder` 0.8.1, `archive` 4.6.0.
+
+### Verified on the Lenovo tablet (TB336FU, Android 16, 8 GB)
+
+`flutter test integration_test/device_pipeline_test.dart` — media served from the PC over
+`adb reverse tcp:8899` so the test does not depend on the tablet's network.
+
+```
+models on device: 595 MB              (whisper tiny + qwen2.5-0.5b, downloaded in-app)
+transcription: 8919 ms                (17 s Ogg Opus, mono 16 kHz)
+transcript: we reviewed the sampling plan for the northern plot. the field data looks
+            consistent with last quarter. we need to finish the sampling plan before
+            friday. marta will send the revised schedule to the lab. the budget review
+            is scheduled for next month.
+summary (on device · llama.cpp · 0.5B): 20326 ms
+sections: {Overview: [...], Decisions & actions: [...], Key points: [...]}
+title: Northern Plot Sampling Plan Review
+```
+
+Word-for-word correct, no service, no network. The extractive path and the `probe()` model
+check were asserted in the same test.
+
+### Gotchas worth not rediscovering
+
+- **A closure created in an instance method captures `this`.** `Isolate.run(() => …)` inside
+  `DeviceModels.download` / `DeviceAi.transcribe` failed with "Illegal argument in isolate
+  message: object is unsendable" because the closure carried the `ChangeNotifier`/`_active`
+  map. Every isolate entry point is now a **static** helper taking only strings/ints; the
+  closure is built there.
+- **sherpa whisper bundles prefix their files**: the real tiny archive holds
+  `tiny-encoder.int8.onnx`, not `encoder.int8.onnx`. Unpacking matches a name that *ends with*
+  the canonical one and writes it under the canonical name, so both layouts install. The
+  archive also carries full-precision models — only the three needed files are written, or
+  `small` would leave 1.4 GB behind.
+- **Ogg Opus decodes with the platform** (`audio_decoder` → MediaCodec), so no FFmpeg and
+  no bundled codec. Decoding to a WAV file and passing only the path into the isolate keeps
+  memory small and the interface trivial.
+- **A 0.5B GGUF invents headings and returns empty arrays** without constrained decoding.
+  `device_llm.dart` now passes a `responseFormat` JSON schema built from the template (plus
+  "every key needs at least one bullet" in the prompt). That fixed
+  `Overview: []` — at roughly 2× the generation time (8 s → 20 s on a 17 s take). Worth it.
+- **`AiBackend` is persisted as a string**; `'device'` was added to `_encode`/`_parseBackend`.
+  Older builds had one mode for both halves, so the legacy `ai.mode` value still seeds both.
+- **`pubspec.yaml` asked for `sdk: ^3.13.7`** while the installed Flutter is 3.47.7 (Dart
+  3.13.5) — `flutter pub get` refused to resolve. Relaxed to `^3.13.5`. If the toolchain is
+  upgraded past 3.13.7 this can go back.
+- **`android.permission.INTERNET`** was only in the debug manifest: on-device downloads would
+  have failed in a release build. Added to `AndroidManifest.xml`.
+- **APK size**: llama.cpp native assets bring `libLiteRtLm.so`, `libggml-vulkan.so`,
+  `libVkLayer_khronos_validation.so` and `libwebgpu_dawn.so` with them (~40 MB per ABI, unused
+  here). Debug (3 ABIs) is ~450 MB; `flutter build apk --release --split-per-abi` is the
+  honest way to install. Excluding the unused libs with `packagingOptions` is untested — do
+  not do it without checking llama.cpp still loads.
+- **`scripts/make_test_clip.py`** makes a spoken Ogg Opus at 16 kHz mono (Windows SAPI +
+  libsndfile), which is what the recorder produces. That is how the integration test has
+  audio without the hardware.
+
+### Deliberate limits
+
+- Search/Ask ran on the service and needed it to be up (fixed in §22 — the index is in the app
+  now), so a device-only setup could transcribe and summarise offline but not search.
+- The on-device catalog stops at whisper `small` and a 1.5B GGUF. 3B/7B and `medium` stay on
+  the machine: RAM, heat and patience.
+- llama.cpp runs **CPU only** (`gpuLayers: 0`, `ComputeDevice.cpu`) on purpose — a broken
+  Vulkan driver should not turn a summary into a crash. Revisit if GPU offload is wanted.
+- Defaults are unchanged (both halves `local`), so an existing PC setup keeps working. The
+  device path is opt-in, per half, in Setup.
+
+### Next, if it is ever wanted
+
+1. ~~On-device Search/Ask~~ — done in §22.
+2. Trim the unused llama.cpp runtimes from the APK, then measure a release build per ABI.
+3. Optional Vulkan offload for the summary model, behind a setting that falls back to CPU.
+4. Speaker labels on device: sherpa-onnx also ships diarization models; the same download
+   machinery would carry them.
+
+## 20. Player bar, titles, lengths, audio export (2026-11-11, later)
+
+Five things a configured library on the tablet exposed. Nothing was deleted: the three
+recordings in `app_flutter/` were used as the test material and are still there.
+
+### 1. The seek slider is back (it was never in this repo)
+
+`Takes` has always tracked `position`/`duration` and exposed `seek`, but **no widget ever
+showed them** — `git log -S"Slider"` on `lib/` is empty, so playback was play/pause only.
+`app/lib/ui/player_bar.dart` now holds `SeekSlider` (the scrubber: a local `_dragging` value,
+seeking only on release), `PlayerBar` (the notes sheet's compact bar) and `formatDuration`.
+
+**The scrubber lives inside the row of the recording that is playing**, not in a bar above the
+list. The first attempt put a `PlayerBar` at the top of the section, and that was wrong twice
+over: it read as *the top take* being in playback, and — because the active row was computed
+from a `playingPath` prop — the list never actually highlighted what was playing. `HomePage`
+rebuilds on `Session`, `TakesSection` on `Takes`, and `Session` does not forward the library's
+notifications, so the prop was stale from the first play. The section now reads
+`takes.current` itself.
+
+- the playing row tints, grows a slider with `position / length` and a stop (✕) under its
+  title, and its play button becomes pause; every other row stays one line high;
+- the notes sheet keeps the compact `PlayerBar` with `onlyFor: take`, so a scrubber is never
+  offered for a different recording than the transcript on screen.
+
+### 2. Every recording read three times too long
+
+`Take.readDuration` divided the Ogg granule by 16 (kHz). Opus granule positions are always
+**48 kHz samples** whatever the stream's own rate is (RFC 7845 §4), so a 16 kHz mono take was
+reported 3× too long: the 1 h 17 m take showed `233:33`, and the short ones `00:18`/`00:16`
+instead of `00:06`/`00:05`. Now `/48`, with a test pinned to the recorder's real layout
+(`app/test/duration_test.dart`). This is the number beside every take, so it was worth
+chasing: it also made the slider's maximum look absurd.
+
+### 3. Titles: `"null"` was being stored as a title
+
+`library.json` held `"...T1300.ogg": "null"`, and the row read “null”. Chat models answer
+`null`, `Untitled`, a quoted sentence, a fenced block or a JSON object often enough that the
+reply cannot be trusted as a title. `cleanTitle()` in `app/lib/ai/notes.dart` now decides, and
+everything that turns a model reply into a title goes through it: the external branch, the
+machine service branch, the on-device GGUF branch and its lead-in fallback.
+
+- rejects `null`/`none`/`n/a`/`untitled`/`unknown`/`…`, refusals (“As an AI…”, “I cannot…”),
+  JSON, and anything longer than 12 words (prose, not a name);
+- strips fences, quotes, backticks, emphasis, list markers, and a trailing full stop;
+- trims to 80 characters with an ellipsis;
+- `Takes.titleFor` applies it again on read, so a junk title saved by an older build reads as
+  *untitled* instead of as text; `_loadIndex` drops those entries on load;
+- a take that has a transcript but no title now asks for one when its notes are opened —
+  once per take per session (`_titleAttempted`), so a model that answers with nothing cannot
+  turn every glance at the notes into another billed request;
+- `generateNotes` asks for the title after *any* run (summary-only included), not only after
+  transcription.
+
+Verified on the tablet: the `"null"` take fell back to its date; opening it once produced
+**“Prueba de funcionamiento”**, which the row and the notes header then showed.
+
+### 4. Save / share the recording
+
+`app/lib/ui/export_audio.dart`, wired to a `Save or share audio` row action and a `Save audio`
+button in the notes sheet:
+
+- copies the take to the cache under its **title** (`Prueba de funcionamiento.ogg`) and hands
+  it to the system share sheet — *Files by Google*, Drive, Bluetooth, another app. That is the
+  download path on Android and needs no storage permission;
+- `safeFileName` strips path separators, `..`, control characters and anything that is not a
+  letter/digit/space/dot/dash/underscore (Unicode-aware, so Malay and Chinese titles keep their
+  letters); untitled takes use `11 Nov 13.00` — the colon becomes a dot, since `:` is illegal
+  on some file systems;
+- the library copy is never moved or renamed, so an export cannot lose a recording.
+
+Verified on the tablet: the share sheet opened with `Prueba de funcionamiento.ogg` listed and
+Files/Drive among the targets.
+
+### 5. An imported MP3 never reached the list
+
+Sharing or picking an MP3 from Boya OS said “Imported … as boya-….mp3” and then the take
+was nowhere: `Takes.refresh` built the library from `f.path.endsWith('.ogg')`, so the copy
+landed in the documents directory and was filtered straight back out. Nothing was wrong with
+the import itself.
+
+- the formats are one set now, `Take.audioExtensions` (`ogg`, `oga`, `opus`, `wav`, `mp3`,
+  `m4a`, `aac`, `flac`, `amr`, matching what the share sheet and picker accept) and
+  `Take.isAudioPath` is what `refresh` asks;
+- length no longer assumes Ogg: `app/lib/state/audio_duration.dart` reads Ogg granule positions,
+  WAV `fmt `/`data` byte rates, FLAC STREAMINFO, and MP3 frames (Xing/Info frame count,
+  otherwise a frame walk, so VBR is right and ID3v1/v2 tags are skipped). M4A/AAC/AMR have no
+  header read here and still show `--:--` instead of a guess;
+- tests in `app/test/duration_test.dart` build one MP3 (with and without ID3v2), one WAV and one
+  FLAC and pin their lengths, plus the extension set `refresh` uses.
+
+The same import path had a second bug: re-importing a recording that was already there made a
+second copy. `importAudio` looked for `_stem(take.name) == base`, but every stored name is
+`boya-<name>-<stamp>.<ext>`, so the comparison never matched — the “already in the library”
+line was unreachable. `Take.findByContent` now decides: size from the index first, then the
+bytes of only the takes of that size, so the answer does not depend on a name a rename or a
+re-export can change, and a same-size different recording is still imported. The notice now
+names the existing take: *“This recording is already in the library as …”*. Tests in
+`app/test/library_test.dart` cover the renamed duplicate, the same-size different file, a
+transcript-only take (never a duplicate) and a share that is gone.
+
+**State:** `flutter analyze` clean, **105 tests** pass. The library now lists whatever the import
+accepts, so an MP3 shared from Boya OS appears (and plays) like any pulled take, and importing
+it a second time says so instead of copying it again. `HANDOFF.md` §19 still describes the AI
+routing; this round changed no pipeline behaviour, only what the UI shows, what it does with a
+model's answer, which files it counts as takes, and what it does with one it has seen before.
+
+## 21. Summary type chosen before the first transcription (2026-11-11, later)
+
+Opening a take with no transcript used to transcribe **and** summarise straight away with the
+default `meeting` template. The template only shapes the summary, not the transcript, but the
+first run is the expensive one (whisper on this tablet), so a lecture was transcribed twice —
+once as a meeting, then again when the right chip was tapped.
+
+`app/lib/ui/notes_sheet.dart` now holds the first run until a type is picked:
+
+- if `notesAction()` says `transcribeAndSummarize` and the take has audio, the sheet opens on a
+  **Summarise this take as** block with full-size `meeting` / `lecture` / `notes` chips instead
+  of starting work in `initState`;
+- tapping one sets the template and starts the run (`_start`), so a single transcription pass
+  yields the summary that was asked for;
+- the choice is remembered: `AiSettings.summaryTemplate` (`ai.summaryTemplate` in preferences)
+  takes the last picked type, and the notes sheet opens a new take on it instead of `meeting`.
+  A take that already has notes always keeps its own template, so an old lecture is not
+  relabelled after a meeting is recorded. Unknown or retired values fall back to `meeting`
+  rather than producing an empty summary; switching the type on an existing take remembers it
+  too;
+- **Redo** is hidden while the choice is pending (it would have forced a `meeting` run);
+- everything else is unchanged: a take that already has a transcript re-summarises in the
+  background for the selected template, switching a template later re-runs only the summary,
+  and a take with no audio (transcript/summary imported from Boya OS) is never touched.
+
+`flutter analyze` clean, **118 tests** pass (the remembered type is pinned in
+`app/test/ai_routing_test.dart`). No pipeline code changed — only when the first run is
+allowed to start and which template it opens with.
+
+---
+
+## 22. Search and Ask stopped needing the service (2026-11-11, last)
+
+With both AI halves set to **On this device**, the app transcribed and summarised with no
+service — and search still failed, because the index lived in `scripts/ai_server.py`. The
+sheet showed *“The local AI service is not answering. Search runs there.”* and no hits. That
+was the one feature the on-device work had left behind (§19 limits, next-step 1).
+
+The index moved into the app:
+
+| Piece | Path | Notes |
+|---|---|---|
+| `app/lib/ai/search_index.dart` | new | BM25 port of `notra/search.py`: tokenize (unicode words + CJK bigrams), question stopwords, summary/transcript passages split on speaker change and 700 chars/8 segments, title weighted twice, phrase bonus, summary-section bonus, 280-char snippet |
+| `app/lib/state/takes.dart` | changed | `final SearchIndex _index` built from `searchDocuments()` in `syncSearchIndex()`; `searchNotes` is now synchronous work; `askNotes` retrieves locally then asks a model |
+| `app/lib/ai/ai_client.dart` | changed | new `answer(question, hits)`: on-device GGUF, or a connected service (external API / the machine's `/chat`), else the passages; `search`/`indexState` removed (the endpoints stay for curl and the CLI) |
+| `app/lib/ai/device/device_llm.dart` | changed | `answerWithGguf` — the same excerpts prompt the service uses |
+| `app/lib/ai/device/device_ai.dart` | changed | `answer()` runs it in an isolate, returns `(text, engine)` or null |
+| `app/lib/ai/ask.dart` | changed | `AskHit.excerpt(n)` — one excerpt line, built in one place so phone and service hand a model the same text |
+| `app/lib/ui/ask_sheet.dart` | changed | says *searched on this device*; the service-down wording and the `indexing` state are gone |
+| `notra/search.py` | changed | the extractive answer now marks `cited` on its sources as well as in the list |
+
+Design decisions worth keeping:
+
+- **Search is not a model feature.** Retrieval is BM25 in Dart on text the app already has, so
+  it works with no service, no network, no GGUF, and no download. A library of a few hundred
+  passages rebuilds in about a millisecond.
+- **Ask degrades honestly, and picks an answerer that exists.** The prose comes from, in
+  order: the on-device GGUF (the device summary half, or any installed one when the machine
+  cannot answer); the external API (when that half is External — an unreachable host falls
+  through to the device model, a rejected key is still raised); the machine's `/chat` (when
+  that half is On this machine **and** `GET /health` answers within 3 s). With none of those,
+  the top three passages are the answer and the engine says `extractive`. A model that throws
+  does not take the passages with it.
+- **The machine is probed, not assumed.** `/chat` used to be called blind; with no PC on the
+  LAN that meant waiting out a TCP connect timeout (up to the 4-minute request timeout) before
+  anything appeared. A 3 s `/health` probe now decides, so the answer comes from the phone
+  (or from the passages) within a second instead.
+- **The machine's copy is still pushed** (fire-and-forget, after a rebuild) so `POST /chat` and
+  `python -m notra find` keep answering from the same corpus. A failure there is silent now:
+  it is no longer on the path of a search. `askNotes` awaits that push only when the summary
+  half is the machine, so a first question cannot race an empty remote index.
+- **`_notesRevision` now also moves on project changes**, since the project is indexed.
+- **A summary without a transcript is indexed.** `searchDocuments` used to require
+  `note.hasTranscript`, so a summary-only import (Boya OS “Export summary”) was listed but
+  unfindable. It now indexes whichever half the take has.
+
+Verified: `flutter analyze` clean; **142 tests** pass (`flutter test`), including the new
+`app/test/search_index_test.dart` (19 cases: tokenising, CJK, stopwords, ranking, timestamps,
+phrasing, speaker split, summary-only take, snippet cut, extractive citations) and five
+`AiClient.answer` routing cases in `app/test/ai_routing_test.dart`: the device answers with
+`[1]` and the source row is marked; a machine with nothing to say hands over to the device; an
+unreachable external host (`*.invalid`) falls back to the device; an external **401** is raised
+rather than hidden (real loopback `HttpServer`); a silent model returns null so the passages
+stand in.
+`python tests/test_search.py` passes with a new check that `cited` flags and the `cited` list
+agree. Not re-run on the tablet this round — the integration test still covers transcription
+and summaries; search needs no hardware.
+
+---
+
+## 23. Recording languages declared before transcription (2026-11-11, last)
+
+Whisper guessed the language of every take. On a short or noisy opening, or a meeting that
+switches between two languages, that guess is the part that gets the transcript wrong — and
+nothing in the app let a person say what they were actually speaking. The first-run panel
+(§21) now also asks, as a multi-select, and the answer is kept.
+
+| Piece | Path | Notes |
+|---|---|---|
+| `app/lib/ai/languages.dart` | new | whisper's 100 codes → names; `normalise` (`EN-gb` → `en`), `sanitise` (dedupe, drop unknown, keep order), `forceFor`, `covers`, `describe`/`label` |
+| `app/lib/ui/language_picker.dart` | new | selected languages as removable chips + **Add language** / **Auto · detect**; one sheet with a search field and every language, multi-select |
+| `app/lib/ai/ai_settings.dart` | extended | `speechLanguages` (`ai.speechLanguages` in preferences, `getStringList`), sanitised on load, `speechLanguagesLabel` |
+| `app/lib/ui/notes_sheet.dart` | extended | **Languages in this recording** in the pre-transcription block; the transcript footer and exported markdown show the name (`German`), not the code |
+| `app/lib/ui/ai_settings_section.dart` | extended | the same picker under Setup → Speech, for any take |
+| `app/lib/ai/ai_client.dart` | extended | `transcribe(..., languages:)`: device passes them, local sends `?languages=de,en`, external sends `language=` and retries once when the guess lands outside the list |
+| `app/lib/ai/device/device_asr.dart` | extended | one whisper pass per forced language; the result's `lang` is used, and a forced language fills in an empty `lang` |
+| `app/lib/ai/device/device_ai.dart` | extended | the list crosses into the transcribe isolate |
+| `app/lib/state/takes.dart` | extended | `generateNotes` passes the remembered list |
+| `scripts/ai_server.py` | extended | `/transcribe` takes `languages=en,de` (and repeated `language=`), same detect-then-fallback rule, `_base_language` normalises |
+| `app/test/languages_test.dart` | new | normalise/sanitise/force/covers/describe, persistence across a load, retired codes ignored |
+| `app/test/ai_routing_test.dart` | extended | the declared list reaches the device half, sanitised, and nothing declared stays `[]` |
+
+Semantics, chosen to keep a second pass rare:
+
+- **One language is forced.** A known language is one whisper does not have to spend a guess
+  on, and the take's `language` falls back to it when sherpa returns an empty `lang`.
+- **Several are not forced.** A language is a property of the whisper model config, not the
+  stream, so each forced language is a recogniser reload — the expensive kind. Instead the
+  first pass detects across the take (a meeting really can switch mid-way) and the first
+  language the person picked is forced **only** when the detection lands outside the list.
+- **Order is the priority.** `setSpeechLanguages` keeps choice order, so "fallback" means the
+  first chip, not an arbitrary set member. Unknown codes (`klingon`) are dropped rather than
+  put on the wire; `en-GB` folds to `en`.
+- **Asked once, remembered.** The picker lives in the same first-run panel as the summary
+  type, and in Setup → Speech; `ai.speechLanguages` restores it on launch. **Redo**
+  re-transcribes with whatever is selected at that moment, so a wrong guess is one tap away.
+
+`flutter analyze` clean; **151 tests** pass, including the new `app/test/languages_test.dart`
+(8 cases). Built `--release --split-per-abi` and installed on the TB336FU tablet
+(`adb -s HA2K8842 install -r app-arm64-v8a-release.apk`, package `dev.geeny.app` 1.0.0). The
+Python service change is not exercised by the Flutter tests; `scripts/ai_server.py` compiles
+and the endpoint ignores unknown parameters, so an older service still transcribes.

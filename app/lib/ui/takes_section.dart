@@ -3,16 +3,89 @@ import 'package:flutter/material.dart';
 import '../state/takes.dart';
 import '../theme/tokens.dart';
 import 'choice_chip.dart';
+import 'export_audio.dart';
 import 'notes_sheet.dart';
+import 'player_bar.dart';
 import 'widgets.dart';
 
 /// The pulled takes, as a ruled ledger: one line each, newest first, with the
-/// project filter above. Everything else about a take lives in its action sheet.
-class TakesSection extends StatelessWidget {
-  const TakesSection({super.key, required this.takes, this.playingPath});
+/// project filter above. Everything else about a take lives in its action sheet,
+/// and the one that is playing opens its own scrubber inside the row.
+///
+/// Group mode turns the ledger into a pick list: two or three takes of different
+/// kinds — a recording, its transcript, its summary — become one take. That is
+/// the manual way to do what the import does when it recognises the same name.
+class TakesSection extends StatefulWidget {
+  const TakesSection({super.key, required this.takes});
 
   final Takes takes;
-  final String? playingPath;
+
+  @override
+  State<TakesSection> createState() => _TakesSectionState();
+}
+
+class _TakesSectionState extends State<TakesSection> {
+  Takes get takes => widget.takes;
+
+  bool _grouping = false;
+  final Set<String> _selected = {};
+
+  /// Selected takes that are still in the library, in list order.
+  List<Take> get _chosen => [
+        for (final take in takes.items)
+          if (_selected.contains(take.file.path)) take,
+      ];
+
+  bool get _canGroup {
+    final chosen = _chosen;
+    if (chosen.length < 2 || chosen.length > 3) return false;
+    final kinds = <TakeKind>{};
+    for (final take in chosen) {
+      final kind = takes.kindOf(take);
+      if (kind == TakeKind.empty || !kinds.add(kind)) return false;
+    }
+    return true;
+  }
+
+  /// One line that says what the selection still needs, or what will happen.
+  String get _hint {
+    final chosen = _chosen;
+    if (chosen.isEmpty) return 'Pick two or three: a recording, a transcript, a summary.';
+    final kinds = <TakeKind>{};
+    for (final take in chosen) {
+      final kind = takes.kindOf(take);
+      if (kind == TakeKind.empty) {
+        return '${take.name} has no transcript or summary to group yet.';
+      }
+      if (!kinds.add(kind)) {
+        return 'Two ${kind.label.toLowerCase()}s picked — one of each kind, please.';
+      }
+    }
+    if (chosen.length == 1) {
+      return '${chosen.first.name} · ${kinds.first.label} — pick one or two more.';
+    }
+    final target = chosen.firstWhere((t) => t.hasAudio, orElse: () => chosen.first);
+    return 'They become one take: ${target.name}.';
+  }
+
+  void _toggle(Take take) {
+    setState(() {
+      if (!_selected.remove(take.file.path)) _selected.add(take.file.path);
+    });
+  }
+
+  void _stopGrouping() => setState(() {
+        _grouping = false;
+        _selected.clear();
+      });
+
+  Future<void> _group() async {
+    final chosen = _chosen;
+    if (chosen.length < 2) return;
+    await takes.groupTakes(chosen);
+    if (!mounted) return;
+    _stopGrouping();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -28,16 +101,26 @@ class TakesSection extends StatelessWidget {
                 Text('Takes', style: Tokens.section),
                 const Spacer(),
                 TextButton.icon(
-                  onPressed: takes.importing ? null : () => _openImport(context, takes),
-                  icon: Icon(takes.importing ? Icons.hourglass_empty : Icons.file_download_outlined,
-                      size: 16),
-                  label: Text(takes.importing ? 'Importing…' : 'Import'),
+                  onPressed: _grouping
+                      ? _stopGrouping
+                      : (takes.items.length < 2 ? null : () => setState(() => _grouping = true)),
+                  icon: Icon(_grouping ? Icons.close : Icons.merge_type, size: 16),
+                  label: Text(_grouping ? 'Cancel' : 'Group'),
                 ),
                 const SizedBox(width: Tokens.s2),
-                Text(items.length == takes.items.length
-                    ? '${items.length} saved'
-                    : '${items.length} of ${takes.items.length}',
-                    style: Tokens.dataSmall),
+                if (!_grouping) ...[
+                  TextButton.icon(
+                    onPressed: takes.importing ? null : () => _openImport(context, takes),
+                    icon: Icon(takes.importing ? Icons.hourglass_empty : Icons.file_download_outlined,
+                        size: 16),
+                    label: Text(takes.importing ? 'Importing…' : 'Import'),
+                  ),
+                  const SizedBox(width: Tokens.s2),
+                  Text(items.length == takes.items.length
+                      ? '${items.length} saved'
+                      : '${items.length} of ${takes.items.length}',
+                      style: Tokens.dataSmall),
+                ],
               ],
             ),
             const SizedBox(height: Tokens.s1),
@@ -113,19 +196,50 @@ class TakesSection extends StatelessWidget {
                       separatorBuilder: (_, _) => const Divider(height: 1),
                       itemBuilder: (context, i) {
                         final take = items[i];
-                        final active = playingPath == take.file.path;
+                        // Read from `takes`, not from a prop: this section
+                        // listens to the library, while the page above it
+                        // listens to the device session and would hand down a
+                        // stale path.
+                        final active = takes.current?.file.path == take.file.path;
                         return _TakeRow(
+                          key: ValueKey(take.file.path),
                           take: take,
                           title: takes.titleFor(take),
+                          kind: takes.kindOf(take),
+                          grouping: _grouping,
+                          selected: _selected.contains(take.file.path),
                           active: active,
                           playing: active && takes.isPlaying,
                           hasNotes: takes.notes.containsKey(take.file.path),
+                          position: takes.position,
+                          duration: takes.duration,
                           onPressed: () => takes.toggle(take),
+                          onSeek: takes.seek,
+                          onStop: takes.stop,
                           onOpen: () => _rowActions(context, takes, take),
+                          onSelect: () => _toggle(take),
                         );
                       },
                     ),
             ),
+            if (_grouping) ...[
+              const Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.only(top: Tokens.s2),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(child: Text(_hint, style: Tokens.bodySmall)),
+                    const SizedBox(width: Tokens.s2),
+                    FilledButton.icon(
+                      onPressed: _canGroup ? _group : null,
+                      icon: const Icon(Icons.merge_type, size: 18),
+                      label: Text(_chosen.isEmpty ? 'Group' : 'Group ${_chosen.length}'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
         );
       },
@@ -212,9 +326,10 @@ Future<void> _openImport(BuildContext context, Takes takes) async {
               const _ImportStep(
                 step: '2',
                 title: 'Transcript and summary',
-                detail: 'Export as TXT, Markdown or SRT and share it. It is attached to the '
-                    'take with the same name, or kept as a transcript-only take. DOCX and PDF '
-                    'are not readable here.',
+                detail: 'Export as TXT, Markdown or SRT and share it. It joins the recording '
+                    'of the same name — the kind suffix (recording, transcript, summary) '
+                    'does not matter — or is kept as a take of its own without audio. DOCX '
+                    'and PDF are not readable here.',
               ),
               const SizedBox(height: Tokens.s4),
               Row(
@@ -275,13 +390,22 @@ class _ImportStep extends StatelessWidget {
   }
 }
 
-class _TakeRow extends StatelessWidget {
+class _TakeRow extends StatefulWidget {
   const _TakeRow({
+    super.key,
     required this.take,
     required this.active,
     required this.playing,
+    required this.position,
+    required this.duration,
     required this.onPressed,
+    required this.onSeek,
+    required this.onStop,
     required this.onOpen,
+    required this.kind,
+    this.grouping = false,
+    this.selected = false,
+    this.onSelect,
     this.hasNotes = false,
     this.title,
   });
@@ -289,17 +413,41 @@ class _TakeRow extends StatelessWidget {
   final Take take;
   final bool active;
   final bool playing;
+  final Duration position;
+  final Duration duration;
   final VoidCallback onPressed;
+  final ValueChanged<Duration> onSeek;
+  final VoidCallback onStop;
   final VoidCallback onOpen;
+
+  /// What the take brings to a group; shown only while grouping.
+  final TakeKind kind;
+  final bool grouping;
+  final bool selected;
+  final VoidCallback? onSelect;
   final bool hasNotes;
   final String? title;
 
   @override
+  State<_TakeRow> createState() => _TakeRowState();
+}
+
+class _TakeRowState extends State<_TakeRow> {
+  @override
   Widget build(BuildContext context) {
+    final take = widget.take;
+    final active = widget.active;
+    final playing = widget.playing;
+    final title = widget.title;
+
     return Material(
-      color: active ? Tokens.accentSoft : Colors.transparent,
+      color: widget.selected
+          ? Tokens.accentSoft
+          : active
+              ? Tokens.accentSoft
+              : Colors.transparent,
       child: InkWell(
-        onTap: onOpen,
+        onTap: widget.grouping ? widget.onSelect : widget.onOpen,
         child: Container(
           decoration: BoxDecoration(
             border: Border(
@@ -310,67 +458,132 @@ class _TakeRow extends StatelessWidget {
             ),
           ),
           padding: const EdgeInsets.symmetric(vertical: Tokens.s1),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              IconButton(
-                onPressed: take.hasAudio ? onPressed : null,
-                iconSize: 20,
-                tooltip: take.hasAudio
-                    ? (playing ? 'Pause' : 'Play')
-                    : 'Transcript only — the audio stayed in Boya OS',
-                constraints: const BoxConstraints(
-                  minWidth: Tokens.target,
-                  minHeight: Tokens.target,
-                ),
-                style: IconButton.styleFrom(
-                  foregroundColor: active ? Tokens.accent : Tokens.ink,
-                  disabledForegroundColor: Tokens.inkSoft.withValues(alpha: 0.5),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(Tokens.r1),
-                    side: const BorderSide(color: Tokens.ruleStrong),
+              Row(
+                children: [
+                  if (widget.grouping)
+                    SizedBox(
+                      width: Tokens.target,
+                      height: Tokens.target,
+                      child: Center(
+                        child: Icon(
+                          widget.selected ? Icons.check_box : Icons.check_box_outline_blank,
+                          size: 22,
+                          color: widget.selected ? Tokens.accent : Tokens.inkSoft,
+                        ),
+                      ),
+                    )
+                  else
+                    IconButton(
+                      onPressed: take.hasAudio ? widget.onPressed : null,
+                      iconSize: 20,
+                      tooltip: take.hasAudio
+                          ? (playing ? 'Pause' : 'Play')
+                          : 'No audio here — it stayed in Boya OS',
+                      constraints: const BoxConstraints(
+                        minWidth: Tokens.target,
+                        minHeight: Tokens.target,
+                      ),
+                      style: IconButton.styleFrom(
+                        foregroundColor: active ? Tokens.accent : Tokens.ink,
+                        disabledForegroundColor: Tokens.inkSoft.withValues(alpha: 0.5),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(Tokens.r1),
+                          side: const BorderSide(color: Tokens.ruleStrong),
+                        ),
+                      ),
+                      icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                    ),
+                  const SizedBox(width: Tokens.s2),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title ?? take.humanDate,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Tokens.body.copyWith(
+                            fontWeight: title != null ? FontWeight.w600 : FontWeight.w400,
+                          ),
+                        ),
+                        Text(
+                          title != null ? take.name : '${take.name} · untitled',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Tokens.dataSmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: Tokens.s2),
+                  if (widget.grouping) ...[
+                    Text(
+                      widget.kind.label.toLowerCase(),
+                      style: Tokens.dataSmall.copyWith(color: Tokens.accent),
+                    ),
+                    const SizedBox(width: Tokens.s2),
+                  ],
+                  Text(take.meta, style: Tokens.dataSmall),
+                  if (widget.hasNotes) ...[
+                    const SizedBox(width: Tokens.s2),
+                    const Icon(Icons.notes, size: 16, color: Tokens.accent),
+                  ],
+                  if (!widget.grouping)
+                    IconButton(
+                      onPressed: widget.onOpen,
+                      tooltip: 'Actions for ${title ?? take.humanDate}',
+                      iconSize: 18,
+                      constraints: const BoxConstraints(
+                        minWidth: Tokens.target,
+                        minHeight: Tokens.target,
+                      ),
+                      color: Tokens.inkSoft,
+                      icon: const Icon(Icons.more_horiz),
+                    ),
+                ],
+              ),
+              // The scrubber belongs to the recording that is playing, so it
+              // opens inside that row rather than floating above the list where
+              // it reads as the top take being in playback.
+              if (active)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    left: Tokens.target + Tokens.s2,
+                    right: Tokens.s1,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: SeekSlider(
+                          key: ValueKey(take.file.path),
+                          position: widget.position,
+                          duration: widget.duration,
+                          onSeek: widget.onSeek,
+                          height: 30,
+                        ),
+                      ),
+                      const SizedBox(width: Tokens.s2),
+                      Text(
+                        '${formatDuration(widget.position)} / ${formatDuration(widget.duration)}',
+                        style: Tokens.dataSmall.copyWith(color: Tokens.inkSoft),
+                      ),
+                      IconButton(
+                        onPressed: widget.onStop,
+                        tooltip: 'Stop',
+                        iconSize: 16,
+                        color: Tokens.inkSoft,
+                        constraints: const BoxConstraints(
+                          minWidth: Tokens.targetCompact,
+                          minHeight: Tokens.targetCompact,
+                        ),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
                   ),
                 ),
-                icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-              ),
-              const SizedBox(width: Tokens.s2),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title ?? take.humanDate,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Tokens.body.copyWith(
-                        fontWeight: title != null ? FontWeight.w600 : FontWeight.w400,
-                      ),
-                    ),
-                    Text(
-                      title != null ? take.name : '${take.name} · untitled',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Tokens.dataSmall,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: Tokens.s2),
-              Text(take.meta, style: Tokens.dataSmall),
-              if (hasNotes) ...[
-                const SizedBox(width: Tokens.s2),
-                const Icon(Icons.notes, size: 16, color: Tokens.accent),
-              ],
-              IconButton(
-                onPressed: onOpen,
-                tooltip: 'Actions for ${title ?? take.humanDate}',
-                iconSize: 18,
-                constraints: const BoxConstraints(
-                  minWidth: Tokens.target,
-                  minHeight: Tokens.target,
-                ),
-                color: Tokens.inkSoft,
-                icon: const Icon(Icons.more_horiz),
-              ),
             ],
           ),
         ),
@@ -408,12 +621,25 @@ Future<void> _rowActions(BuildContext context, Takes takes, Take take) async {
                 title: Text(playing ? 'Pause' : 'Play', style: Tokens.body),
                 onTap: () => Navigator.of(ctx).pop('play'),
               ),
+            if (take.hasAudio)
+              ListTile(
+                minVerticalPadding: Tokens.s3,
+                leading: const Icon(Icons.download_outlined, color: Tokens.ink),
+                title: const Text('Save or share audio', style: Tokens.body),
+                subtitle: Text('Hands the .ogg to the system sheet — Files, Drive, another app',
+                    style: Tokens.caption),
+                onTap: () => Navigator.of(ctx).pop('export'),
+              ),
             ListTile(
               minVerticalPadding: Tokens.s3,
               leading: Icon(takes.notes.containsKey(take.file.path) ? Icons.notes : Icons.article_outlined,
                   color: Tokens.accent),
               title: Text(
-                takes.notes.containsKey(take.file.path) ? 'Show transcript' : 'Transcribe & summarise',
+                switch (takes.notes[take.file.path]) {
+                  null => 'Transcribe & summarise',
+                  final note when note.hasTranscript => 'Show transcript',
+                  _ => 'Show summary',
+                },
                 style: Tokens.body,
               ),
               onTap: () => Navigator.of(ctx).pop('notes'),
@@ -445,6 +671,8 @@ Future<void> _rowActions(BuildContext context, Takes takes, Take take) async {
   switch (action) {
     case 'play':
       await takes.toggle(take);
+    case 'export':
+      await exportTakeAudio(context, takes, take);
     case 'notes':
       await openNotes(context, takes, take);
     case 'project':

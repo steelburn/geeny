@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -5,20 +6,34 @@ import 'package:http/http.dart' as http;
 
 import 'ai_settings.dart';
 import 'ask.dart';
+import 'device/device_ai.dart';
+import 'device/device_models.dart';
+import 'languages.dart';
 import 'notes.dart';
 
 /// Client for transcription/summaries.
 ///
-/// Two backends, chosen independently for each job in [AiSettings]:
-///  * local  — `scripts/ai_server.py` (whisper + a local GGUF, or extractive)
+/// Three backends, chosen independently for each job in [AiSettings]:
+///  * device  — whisper + a GGUF inside the app (see [DeviceAi])
+///  * local   — `scripts/ai_server.py` (whisper + a local GGUF, or extractive)
 ///  * external — any OpenAI-compatible API (`/audio/transcriptions` +
 ///    `/chat/completions`).
 ///
-/// So local speech can feed an external summary model, and the other way round.
+/// Search is answered by the device's model or by a connected service, whichever
+/// is there — see [answer].
+///
+/// So on-device speech can feed the machine's summary model, and the other way
+/// round. Nothing here uploads unless the half in question is External.
 class AiClient {
-  AiClient(this.settings);
+  /// [deviceOverride] exists for tests: the real engine is built from [settings]
+  /// and would otherwise need a phone to stand up.
+  AiClient(this.settings, {DeviceAi? deviceOverride})
+      : device = deviceOverride ?? DeviceAi(settings);
 
   final AiSettings settings;
+
+  /// The on-device engine, its model store and its download progress.
+  final DeviceAi device;
 
   Uri _local(String path, [Map<String, String>? query]) =>
       Uri.parse('${settings.localUrl}$path').replace(queryParameters: query);
@@ -45,6 +60,10 @@ class AiClient {
   /// null when every selected backend looks usable, else a human-readable reason.
   Future<String?> probe({Duration timeout = const Duration(seconds: 6)}) async {
     final problems = <String>[];
+    if (settings.usesDevice) {
+      final p = await device.probe();
+      if (p != null) problems.add(p);
+    }
     if (settings.usesLocal) {
       final p = await _probeLocal();
       if (p != null) problems.add(p);
@@ -55,6 +74,18 @@ class AiClient {
     }
     return problems.isEmpty ? null : problems.join(' · ');
   }
+
+  /// Installed on-device models, sizes and what is in use. Null when neither
+  /// half is set to On this device.
+  Future<Map<String, dynamic>?> deviceHealth() async {
+    if (!settings.usesDevice) return null;
+    return device.health();
+  }
+
+  /// The on-device model store, once its directory has been resolved.
+  DeviceModels? get deviceModels => device.modelsIfReady;
+
+  Future<DeviceModels> ensureDeviceModels() => device.models();
 
   /// Try the configured address and the usual suspects; adopt the one that answers.
   Future<String?> _probeLocal() async {
@@ -74,7 +105,8 @@ class AiClient {
         // try the next address
       }
     }
-    return 'No AI service found (${tried.join(', ')}) — start scripts/ai_server.py';
+    return 'No AI service found (${tried.join(', ')}) — start scripts/ai_server.py, or set '
+        'Speech to On this device for offline whisper';
   }
 
   Future<String?> _probeExternal(Duration timeout) async {
@@ -189,34 +221,7 @@ class AiClient {
     }
   }
 
-  /// What the service currently holds. Used to notice a restarted service, whose
-  /// in-memory index is empty even though the app has already pushed once.
-  Future<Map<String, dynamic>?> indexState() async {
-    try {
-      final r = await http.get(_local('/index')).timeout(const Duration(seconds: 8));
-      if (r.statusCode != 200) return null;
-      return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Ranked passages for a query. Empty when nothing matches.
-  Future<List<AskHit>> search(String query, {int limit = 12}) async {
-    final r = await http
-        .post(_local('/search'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'query': query, 'limit': limit}))
-        .timeout(const Duration(seconds: 20));
-    if (r.statusCode != 200) throw _fail(r);
-    final body = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
-    return [
-      for (final hit in (body['hits'] as List? ?? const []))
-        if (hit is Map) AskHit.fromJson(hit.cast<String, dynamic>()),
-    ];
-  }
-
-  /// A written answer with citations, from the local model.
+  /// A written answer with citations, from the model on the machine.
   Future<AskAnswer?> ask(String question, {int limit = 6}) async {
     final r = await http
         .post(_local('/chat'),
@@ -234,11 +239,125 @@ class AiClient {
     return answer;
   }
 
+  /// Write an answer over passages the app already retrieved.
+  ///
+  /// Retrieval is local (see `SearchIndex`); this only decides who writes the
+  /// prose. Two answerers are used, whichever is available:
+  ///  * **on this device** — the chosen on-device summary model, or any installed
+  ///    GGUF when there is no connected service to ask;
+  ///  * **a connected service** — the external API when the summary half is
+  ///    External, or the machine's `/chat` when it is On this machine.
+  ///
+  /// A service that is not there costs one short probe, not a connect timeout, and
+  /// is not an error: the phone's own model takes over. `null` means no model
+  /// wrote it, and the caller shows the passages themselves.
+  Future<AskAnswer?> answer(String question, List<AskHit> hits) async {
+    if (hits.isEmpty) return null;
+    if (settings.summaryOnDevice) return _deviceAnswer(question, hits);
+    if (settings.summaryExternal) {
+      try {
+        final text = await _answerExternal(question, hits);
+        if (text != null) return _cited(text, hits, 'external · ${settings.externalSummary}');
+      } on Exception catch (e) {
+        // A service that cannot be reached falls back to the phone; one that
+        // answers with an error (a rejected key, say) is a real problem and stays.
+        final unreachable = e is SocketException ||
+            e is http.ClientException ||
+            e is TimeoutException;
+        if (!unreachable) rethrow;
+      }
+      return _deviceAnswer(question, hits);
+    }
+    if (await _serviceConnected()) {
+      try {
+        final fromMachine = await ask(question, limit: hits.length);
+        if (fromMachine != null && fromMachine.answer.isNotEmpty) return fromMachine;
+      } catch (_) {
+        // A service that answers badly is the same as one that is not there.
+      }
+    }
+    return _deviceAnswer(question, hits);
+  }
+
+  /// The on-device model, when one is installed; null otherwise (extractive).
+  Future<AskAnswer?> _deviceAnswer(String question, List<AskHit> hits) async {
+    final result = await device.answer(question, hits);
+    if (result == null) return null;
+    return _cited(result.text, hits, result.engine);
+  }
+
+  /// True when the machine's service answers `GET /health`.
+  ///
+  /// Asked before `/chat` so a phone with no PC next to it moves on to its own
+  /// model in a second instead of waiting out a TCP connect timeout.
+  Future<bool> _serviceConnected() async {
+    try {
+      final r = await http.get(_local('/health')).timeout(const Duration(seconds: 3));
+      return r.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Mark the sources the answer actually cited, and keep their order.
+  static AskAnswer _cited(String text, List<AskHit> hits, String engine) {
+    final cited = <int>{};
+    for (final m in RegExp(r'\[(\d+)\]').allMatches(text)) {
+      final n = int.tryParse(m.group(1)!);
+      if (n != null && n >= 1 && n <= hits.length) cited.add(n);
+    }
+    for (var i = 0; i < hits.length; i++) {
+      hits[i].cited = cited.contains(i + 1);
+    }
+    return AskAnswer(answer: text.trim(), engine: engine, sources: hits);
+  }
+
+  Future<String?> _answerExternal(String question, List<AskHit> hits) async {
+    final excerpts = [
+      for (var i = 0; i < hits.length; i++) hits[i].excerpt(i + 1),
+    ].join('\n');
+    final prompt = 'You answer questions about the user\'s recorded notes.\n'
+        'Use ONLY the numbered excerpts below. After each fact, cite the excerpt number in '
+        'square brackets, like [2]. If the excerpts do not contain the answer, say so in one '
+        'short sentence — do not guess and do not invent names, dates or numbers.\n'
+        'Answer in the language of the question. Be brief.\n\n'
+        'EXCERPTS\n$excerpts\n\nQUESTION: $question';
+    final r = await http
+        .post(_external('/chat/completions'),
+            headers: {'Content-Type': 'application/json', ..._auth},
+            body: jsonEncode({
+              'model': settings.externalSummary,
+              'temperature': 0.2,
+              'max_tokens': 400,
+              'messages': [
+                {
+                  'role': 'system',
+                  'content': 'You answer only from the given excerpts, with citations.',
+                },
+                {'role': 'user', 'content': prompt},
+              ],
+            }))
+        .timeout(const Duration(minutes: 2));
+    if (r.statusCode != 200) throw _fail(r);
+    final body = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+    final text = body['choices'][0]['message']['content'].toString().trim();
+    return text.isEmpty ? null : text;
+  }
+
+  /// Transcribe [audio]. [languages] are whisper codes the take may contain,
+  /// most likely first; empty means let the backend detect. See
+  /// [SpeechLanguages] for how each half uses the list.
   Future<Map<String, dynamic>> transcribe(File audio,
-      {Duration timeout = const Duration(minutes: 10)}) async {
-    if (settings.speechExternal) return _transcribeExternal(audio, timeout);
+      {Duration timeout = const Duration(minutes: 10),
+      List<String> languages = const []}) async {
+    final chosen = SpeechLanguages.sanitise(languages);
+    if (settings.speechOnDevice) return device.transcribe(audio, languages: chosen);
+    if (settings.speechExternal) return _transcribeExternal(audio, timeout, chosen);
     final bytes = await audio.readAsBytes();
-    final uri = _local('/transcribe', {'model': settings.localSpeech});
+    final uri = _local('/transcribe', {
+      'model': settings.localSpeech,
+      if (chosen.isNotEmpty) 'languages': chosen.join(','),
+    });
     final r = await http
         .post(uri, headers: {'Content-Type': 'application/octet-stream'}, body: bytes)
         .timeout(timeout);
@@ -248,16 +367,17 @@ class AiClient {
     return json;
   }
 
-  Future<Map<String, dynamic>> _transcribeExternal(File audio, Duration timeout) async {
-    final req = http.MultipartRequest('POST', _external('/audio/transcriptions'))
-      ..headers.addAll(_auth)
-      ..fields['model'] = settings.externalSpeech
-      ..fields['response_format'] = 'verbose_json'
-      ..files.add(await http.MultipartFile.fromPath('file', audio.path));
-    final streamed = await req.send().timeout(timeout);
-    final r = await http.Response.fromStream(streamed);
-    if (r.statusCode != 200) throw _fail(r);
-    final body = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+  Future<Map<String, dynamic>> _transcribeExternal(
+      File audio, Duration timeout, List<String> languages) async {
+    final forced = SpeechLanguages.forceFor(languages);
+    var body = await _postAudio(audio, timeout, forced);
+    // More than one language named: the service detects across the take. Only
+    // when that guess lands outside the list is the first choice forced and the
+    // audio uploaded again — a second upload is the expensive part.
+    if (languages.length > 1 &&
+        !SpeechLanguages.covers(languages, (body['language'] ?? '').toString())) {
+      body = await _postAudio(audio, timeout, languages.first);
+    }
     final segments = <Map<String, dynamic>>[];
     for (final s in (body['segments'] as List? ?? const [])) {
       if (s is Map) {
@@ -280,8 +400,27 @@ class AiClient {
     };
   }
 
+  /// One `/audio/transcriptions` call, with [language] forced when it is not
+  /// empty.
+  Future<Map<String, dynamic>> _postAudio(
+      File audio, Duration timeout, String language) async {
+    final req = http.MultipartRequest('POST', _external('/audio/transcriptions'))
+      ..headers.addAll(_auth)
+      ..fields['model'] = settings.externalSpeech
+      ..fields['response_format'] = 'verbose_json';
+    if (language.isNotEmpty) req.fields['language'] = language;
+    req.files.add(await http.MultipartFile.fromPath('file', audio.path));
+    final streamed = await req.send().timeout(timeout);
+    final r = await http.Response.fromStream(streamed);
+    if (r.statusCode != 200) throw _fail(r);
+    return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
+  }
+
   Future<Map<String, dynamic>> summarize(Map<String, dynamic> transcript,
       {String template = 'meeting', Duration timeout = const Duration(minutes: 3)}) async {
+    if (settings.summaryOnDevice) {
+      return device.summarize(transcript, template: template);
+    }
     if (!settings.summaryExternal) {
       final r = await http
           .post(_local('/summarize'),
@@ -336,9 +475,10 @@ class AiClient {
     };
   }
 
-  /// A short title for a transcript. Local summary mode asks the service (GGUF or
-  /// lead-in fallback); external summary mode uses the chat model.
+  /// A short title for a transcript. On-device and local summary modes ask the
+  /// GGUF (or lead-in fallback); external summary mode uses the chat model.
   Future<String?> title(Map<String, dynamic> transcript) async {
+    if (settings.summaryOnDevice) return device.title(transcript);
     final parts = [
       for (final s in (transcript['segments'] as List? ?? const [])) s['text'],
     ];
@@ -367,8 +507,9 @@ class AiClient {
         if (r.statusCode != 200) return null;
         final body = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
         final raw = body['choices'][0]['message']['content'].toString().trim();
-        final first = raw.split('\n').first.trim().replaceAll('"', '').replaceAll("'", '');
-        return first.isEmpty ? null : first;
+        // Chat models answer "null", a quoted phrase or a whole paragraph often
+        // enough that the reply is not trusted as a title on its own.
+        return cleanTitle(raw);
       }
       final r = await http
           .post(_local('/title'),
@@ -381,8 +522,7 @@ class AiClient {
           .timeout(const Duration(seconds: 90));
       if (r.statusCode != 200) return null;
       final body = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
-      final title = (body['title'] ?? '').toString().trim();
-      return title.isEmpty ? null : title;
+      return cleanTitle((body['title'] ?? '').toString());
     } catch (_) {
       return null;
     }

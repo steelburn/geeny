@@ -63,6 +63,17 @@ class AskHit {
     ];
     return parts.join(' · ');
   }
+
+  /// `[n] Title · 00:42 — passage`: the excerpt line a model cites by number.
+  ///
+  /// Built here so the phone and the machine's service hand a model the same
+  /// text, and an answer reads the same whichever backend wrote it.
+  String excerpt(int number) {
+    final at = start != null
+        ? ' · $stamp'
+        : (section.isEmpty ? '' : ' · $section');
+    return '[$number] $title$at — $text';
+  }
 }
 
 class AskAnswer {

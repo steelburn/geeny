@@ -78,6 +78,15 @@ class BleLink implements Link {
       await FlutterBluePlus.startScan(
         timeout: timeout,
         androidUsesFineLocation: false,
+      ).timeout(
+        // The plugin answers this only once the radio is actually scanning. When
+        // it does not (a permission prompt that never gets an answer, a Bluetooth
+        // stack that has wedged), the call never completes and Connect sat on
+        // "Scanning…" forever — the scan timeout below is only reached after
+        // this returns.
+        const Duration(seconds: 8),
+        onTimeout: () => throw NotraNotFoundException(
+            'Bluetooth did not start a scan. Turn Bluetooth off and on again, then try Connect.'),
       );
       return await found.future.timeout(timeout + const Duration(seconds: 3),
           onTimeout: () => throw NotraNotFoundException(seen.isEmpty

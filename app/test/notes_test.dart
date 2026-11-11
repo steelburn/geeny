@@ -129,4 +129,60 @@ void main() {
     expect(overview.value, ['A real sentence from the take.']);
     expect(notesAction(notes: restored, template: 'meeting'), NotesAction.none);
   });
+
+  group('a group is one set of notes', () {
+    final transcriptOnly = notes();
+    final summaryOnly = TakeNotes(
+      path: '/tmp/summary.ogg',
+      language: '',
+      duration: 0,
+      segments: [],
+      summary: {
+        'template': 'meeting',
+        'engine': 'imported · Boya OS export',
+        'sections': {
+          'Overview': ['The recorder budget is over by four percent.'],
+          'Key points': ['Move the purchase to next quarter.'],
+        },
+      },
+    );
+
+    test('a transcript and a summary become one sidecar', () {
+      final combined = combineNotes('/tmp/take.ogg', [transcriptOnly, summaryOnly]);
+      expect(combined.hasTranscript, isTrue);
+      expect(combined.segments.single.text, 'A real sentence from the take.');
+      expect(combined.hasSummary, isTrue);
+      final sections = combined.summarySections;
+      expect(sections.firstWhere((e) => e.key == 'Overview').value,
+          ['The recorder budget is over by four percent.']);
+      expect(sections.firstWhere((e) => e.key == 'Key points').value,
+          ['Move the purchase to next quarter.']);
+    });
+
+    test('the first transcript wins, so one meeting is not transcribed twice', () {
+      final second = notes(segments: [NoteSegment(0, 4, 'A different sentence entirely.')]);
+      final combined = combineNotes('/tmp/take.ogg', [transcriptOnly, second]);
+      expect(combined.segments.single.text, 'A real sentence from the take.');
+    });
+
+    test('summaries add the bullets they are missing, once', () {
+      final first = notes(summary: meetingSummary);
+      final second = notes(summary: {
+        'template': 'meeting',
+        'engine': 'extractive',
+        'sections': {
+          'Overview': ['A real sentence from the take.', 'A new bullet.'],
+        },
+      });
+      final combined = combineNotes('/tmp/take.ogg', [first, second]);
+      final overview = combined.summarySections.firstWhere((e) => e.key == 'Overview');
+      expect(overview.value, ['A real sentence from the take.', 'A new bullet.']);
+    });
+
+    test('parts without notes do not invent any', () {
+      final combined = combineNotes('/tmp/take.ogg', const []);
+      expect(combined.hasTranscript, isFalse);
+      expect(combined.hasSummary, isFalse);
+    });
+  });
 }

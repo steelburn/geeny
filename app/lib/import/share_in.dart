@@ -26,10 +26,15 @@ class SharedFile {
     return dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
   }
 
-  static const _audio = {'ogg', 'opus', 'oga', 'wav', 'mp3', 'm4a', 'flac', 'aac', 'amr'};
+  /// Containers the import accepts, matching what `MainActivity` copies out of a
+  /// content URI. `Take.audioExtensions` is this same set: a file the share
+  /// sheet accepts but the library will not list is an import that vanishes.
+  static const audioExtensions = {
+    'ogg', 'opus', 'oga', 'wav', 'mp3', 'm4a', 'flac', 'aac', 'amr',
+  };
   static const _text = {'json', 'txt', 'md', 'markdown', 'srt'};
 
-  bool get isAudio => _audio.contains(extension) || mime.startsWith('audio/');
+  bool get isAudio => audioExtensions.contains(extension) || mime.startsWith('audio/');
   bool get isText => _text.contains(extension) || mime.startsWith('text/') || mime == 'application/json';
 
   /// True for the formats the local service can decode without extra tooling.

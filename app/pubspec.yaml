@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.13.7
+  sdk: ^3.13.5
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -41,8 +41,18 @@ dependencies:
   shared_preferences: ^2.5.6
   share_plus: ^13.3.1
 
+  # On-device AI (Settings -> Speech/Summary -> On this device):
+  # whisper via sherpa-onnx, summaries via llama.cpp (GGUF), Ogg Opus decoded by
+  # the platform's own codecs, and tar.bz2 for the whisper model bundles.
+  sherpa_onnx: ^2.0.1
+  llamadart: ^0.19.4
+  audio_decoder: ^0.8.1
+  archive: ^4.0.7
+
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to

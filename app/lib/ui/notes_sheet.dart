@@ -5,10 +5,14 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../ai/languages.dart';
 import '../ai/notes.dart';
 import '../state/takes.dart';
 import '../theme/tokens.dart';
 import 'choice_chip.dart';
+import 'export_audio.dart';
+import 'language_picker.dart';
+import 'player_bar.dart';
 import 'widgets.dart';
 
 /// Opens the transcript/summary sheet for a take. Runs the local AI service on
@@ -50,22 +54,57 @@ class _NotesSheetState extends State<_NotesSheet> {
   String template = 'meeting';
   bool showTranscript = false;
 
+  /// True until the person picks a summary type for a take that has no
+  /// transcript yet. The first run is the expensive one (whisper on this
+  /// device), so it waits for the choice instead of summarising everything as
+  /// a meeting and redoing it moments later.
+  bool _choosingTemplate = false;
+
   @override
   void initState() {
     super.initState();
     showTranscript = widget.showTranscript;
     final existing = widget.takes.notes[widget.take.file.path];
-    if (existing != null) template = existing.template;
+    // A take that already has notes keeps the template they were made with; a
+    // new one opens on the type last chosen, so a lecture module does not have
+    // to be picked again for every recording.
+    template = existing?.template ?? widget.takes.aiSettings.summaryTemplate;
     // Only start work when something is actually missing; an existing transcript
     // or summary is shown as-is.
     final action = notesAction(notes: existing, template: template);
-    if (action != NotesAction.none) {
+    // An import whose audio stayed in Boya OS has nothing to transcribe; its
+    // transcript/summary is what it is. Running the service would only fail on a
+    // file that does not exist.
+    if (action == NotesAction.transcribeAndSummarize && widget.take.hasAudio) {
+      // Nothing transcribed yet: ask which kind of summary this is first.
+      _choosingTemplate = true;
+    } else if (action != NotesAction.none && widget.take.hasAudio) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _run());
+    } else if (existing != null &&
+        existing.hasTranscript &&
+        widget.takes.titleFor(widget.take) == null) {
+      // Everything else is cached, but the take still has no title: ask for one
+      // in the background. Nothing is re-transcribed, and a model that answers
+      // with nothing keeps the take untitled.
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => widget.takes.generateTitle(widget.take, existing.transcriptJson));
     }
+  }
+
+  /// Start the first run with the chosen template, so the one transcription
+  /// pass also yields the summary shape the person wanted.
+  void _start(String chosen) {
+    widget.takes.aiSettings.setSummaryTemplate(chosen);
+    setState(() {
+      template = chosen;
+      _choosingTemplate = false;
+    });
+    _run();
   }
 
   Future<void> _run() async {
     final notes = widget.takes.notes[widget.take.file.path];
+    if (!widget.take.hasAudio && (notes == null || !notes.hasTranscript)) return;
     switch (notesAction(notes: notes, template: template)) {
       case NotesAction.transcribeAndSummarize:
         await widget.takes.generateNotes(widget.take, template: template);
@@ -115,9 +154,8 @@ class _NotesSheetState extends State<_NotesSheet> {
 
   Future<void> _export(TakeNotes notes) async {
     final title = widget.takes.titleFor(widget.take) ?? widget.take.name;
-    final safe = title.replaceAll(RegExp(r'[^A-Za-z0-9 _-]'), '').trim();
     final dir = await getTemporaryDirectory();
-    final file = File('${dir.path}/${safe.isEmpty ? 'take' : safe}.md');
+    final file = File('${dir.path}/${safeFileName(title)}.md');
     await file.writeAsString(_markdown(notes, title));
     await SharePlus.instance.share(ShareParams(files: [XFile(file.path)], text: title));
   }
@@ -183,41 +221,83 @@ class _NotesSheetState extends State<_NotesSheet> {
                     ],
                   ),
                   const SizedBox(height: Tokens.s2),
-                  Wrap(
-                    spacing: Tokens.s2,
-                    runSpacing: Tokens.s2,
-                    children: [
-                      for (final t in const ['meeting', 'lecture', 'plain'])
-                        ChoiceChipButton(
-                          label: t == 'plain' ? 'notes' : t,
-                          compact: true,
-                          selected: template == t,
-                          onTap: busy
-                              ? null
-                              : () {
-                                  setState(() => template = t);
-                                  final action = notesAction(
-                                    notes: takes.notes[widget.take.file.path],
-                                    template: t,
-                                  );
-                                  if (action != NotesAction.none) _run();
-                                },
-                        ),
-                    ],
-                  ),
+                  if (_choosingTemplate) ...[
+                    Text('Summarise this take as', style: Tokens.section),
+                    const SizedBox(height: Tokens.s1),
+                    Wrap(
+                      spacing: Tokens.s2,
+                      runSpacing: Tokens.s2,
+                      children: [
+                        for (final t in const ['meeting', 'lecture', 'plain'])
+                          ChoiceChipButton(
+                            label: t == 'plain' ? 'notes' : t,
+                            selected: template == t,
+                            onTap: busy ? null : () => _start(t),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: Tokens.s1),
+                    Text(
+                      'Pick one to start the first transcription. Geeny remembers it '
+                      'for the next take; switching later only remakes the summary.',
+                      style: Tokens.bodySmall,
+                    ),
+                    const SizedBox(height: Tokens.s3),
+                    Text('Languages in this recording', style: Tokens.section),
+                    const SizedBox(height: Tokens.s1),
+                    LanguagePicker(
+                      selected: widget.takes.aiSettings.speechLanguages,
+                      onChanged: (v) => setState(
+                          () => widget.takes.aiSettings.setSpeechLanguages(v)),
+                    ),
+                    const SizedBox(height: Tokens.s1),
+                    Text(
+                      widget.takes.aiSettings.speechLanguages.isEmpty
+                          ? 'Auto lets whisper work out the language. Name it when the take is '
+                              'short, noisy or mixes two languages — the guess is then never '
+                              'spent on a language you were not speaking.'
+                          : 'Remembered for the next take and the next session. Wrong guess? '
+                              'Redo re-transcribes with whatever is selected then.',
+                      style: Tokens.bodySmall,
+                    ),
+                  ] else
+                    Wrap(
+                      spacing: Tokens.s2,
+                      runSpacing: Tokens.s2,
+                      children: [
+                        for (final t in const ['meeting', 'lecture', 'plain'])
+                          ChoiceChipButton(
+                            label: t == 'plain' ? 'notes' : t,
+                            compact: true,
+                            selected: template == t,
+                            onTap: busy
+                                ? null
+                                : () {
+                                    widget.takes.aiSettings.setSummaryTemplate(t);
+                                    setState(() => template = t);
+                                    final action = notesAction(
+                                      notes: takes.notes[widget.take.file.path],
+                                      template: t,
+                                    );
+                                    if (action != NotesAction.none) _run();
+                                  },
+                          ),
+                      ],
+                    ),
                   const SizedBox(height: Tokens.s1),
                   Wrap(
                     spacing: Tokens.s2,
                     runSpacing: Tokens.s2,
                     children: [
-                      TextButton.icon(
-                        onPressed: busy
-                            ? null
-                            : () => widget.takes
-                                .generateNotes(widget.take, template: template, force: true),
-                        icon: const Icon(Icons.refresh, size: 16),
-                        label: const Text('Redo'),
-                      ),
+                      if (!_choosingTemplate)
+                        TextButton.icon(
+                          onPressed: busy
+                              ? null
+                              : () => widget.takes
+                                  .generateNotes(widget.take, template: template, force: true),
+                          icon: const Icon(Icons.refresh, size: 16),
+                          label: const Text('Redo'),
+                        ),
                       if (notes != null && !busy) ...[
                         TextButton.icon(
                           onPressed: () => _copy('Summary', _summaryText(notes)),
@@ -234,9 +314,18 @@ class _NotesSheetState extends State<_NotesSheet> {
                           icon: const Icon(Icons.ios_share, size: 16),
                           label: const Text('Export .md'),
                         ),
+                        if (widget.take.hasAudio)
+                          TextButton.icon(
+                            onPressed: () =>
+                                exportTakeAudio(context, widget.takes, widget.take),
+                            icon: const Icon(Icons.download_outlined, size: 16),
+                            label: const Text('Save audio'),
+                          ),
                       ],
                     ],
                   ),
+                  const SizedBox(height: Tokens.s1),
+                  PlayerBar(takes: takes, compact: true, onlyFor: widget.take),
                   const SizedBox(height: Tokens.s1),
                   Row(
                     children: [
@@ -370,7 +459,7 @@ class _NotesBody extends StatelessWidget {
           ),
         const SizedBox(height: Tokens.s2),
         Text(
-          '${notes.language} · '
+          '${SpeechLanguages.label(notes.language)} · '
           '${NoteSegment.anyLabelled(notes.segments) ? 'speakers identified' : 'one speaker'}',
           style: Tokens.caption,
         ),
@@ -402,7 +491,8 @@ String _markdown(TakeNotes notes, String title) {
   final b = StringBuffer()
     ..writeln('# $title')
     ..writeln()
-    ..writeln('_${notes.duration.toStringAsFixed(0)}s · ${notes.language} · '
+    ..writeln('_${notes.duration.toStringAsFixed(0)}s · '
+        '${SpeechLanguages.label(notes.language)} · '
         '${notes.summary?['engine'] ?? 'extractive'} summary_')
     ..writeln();
   final summary = _summaryText(notes);

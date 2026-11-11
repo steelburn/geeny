@@ -103,4 +103,38 @@ Overview:
     expect(notes.summary, isNull);
     expect(notes.segments.single.text, 'one line');
   });
+
+  group('exports of one meeting share a group key', () {
+    test('the kind suffix and the extension do not split the group', () {
+      final keys = {
+        exportGroupKey('Sampling walk (Recording).ogg'),
+        exportGroupKey('Sampling walk (Transcript).txt'),
+        exportGroupKey('Sampling walk - Summary.md'),
+        exportGroupKey('Sampling walk.srt'),
+        exportGroupKey('sampling_walk_recording.wav'),
+      };
+      expect(keys, {'sampling walk'});
+    });
+
+    test('a name Geeny already stored keeps the same key', () {
+      expect(exportGroupKey('boya-Sampling walk-2026-11-11T0908.ogg'), 'sampling walk');
+      expect(exportGroupKey('imported-Sampling-walk-2026-11-11T0908.ogg'), 'sampling walk');
+    });
+
+    test('a copy marker and more than one suffix are still the same meeting', () {
+      expect(exportGroupKey('Sampling walk (Transcript) (1).txt'), 'sampling walk');
+      expect(exportGroupKey('Sampling walk - summary copy.md'), 'sampling walk');
+    });
+
+    test('different meetings keep different keys', () {
+      expect(exportGroupKey('Budget review transcript.txt'), 'budget review');
+      expect(exportGroupKey('Budget review summary.md'), 'budget review');
+      expect(exportGroupKey('Field notes transcript.txt'), isNot('budget review'));
+    });
+
+    test('a suffix without a name is not a key, so nothing is grouped on it', () {
+      expect(exportGroupKey('recording.ogg'), '');
+      expect(exportGroupKey('Transcript.txt'), '');
+    });
+  });
 }

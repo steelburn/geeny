@@ -66,10 +66,7 @@ class _HomePageState extends State<HomePage> {
                         _StatusBar(session: session),
                         const SizedBox(height: Tokens.s4),
                         Expanded(
-                          child: TakesSection(
-                            takes: session.takes,
-                            playingPath: session.takes.current?.file.path,
-                          ),
+                          child: TakesSection(takes: session.takes),
                         ),
                       ],
                     ),

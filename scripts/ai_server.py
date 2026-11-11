@@ -149,7 +149,23 @@ def _do_search(query: str, limit: int) -> dict:
     return {"query": query, "hits": hits, "documents": documents}
 
 
-def _transcribe_bytes(blob: bytes, model_size: str = DEFAULT_MODEL) -> ai.Transcript:
+def _transcribe_bytes(
+    blob: bytes, model_size: str = DEFAULT_MODEL, languages: tuple[str, ...] = ()
+) -> ai.Transcript:
+    """Transcribe one upload.
+
+    ``languages`` are whisper codes the take may contain, most likely first (the
+    app asks before the first transcription and remembers the answer). One code
+    is forced; several leave the first pass to whisper's own detector — a meeting
+    can switch languages mid-take — and only when that guess lands outside the
+    list is the first choice forced with a second pass.
+    """
+    wanted: list[str] = []
+    for raw in languages:
+        code = _base_language(raw)
+        if code and code not in wanted:
+            wanted.append(code)
+
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as fh:
         fh.write(blob)
         tmp = Path(fh.name)
@@ -162,20 +178,33 @@ def _transcribe_bytes(blob: bytes, model_size: str = DEFAULT_MODEL) -> ai.Transc
         audio, rate = sf.read(str(tmp), dtype="float32", always_2d=False)
         if rate != 16000:
             raise RuntimeError(f"expected 16 kHz, got {rate}")
+        audio = np.ascontiguousarray(audio)
+        forced = wanted[0] if len(wanted) == 1 else None
         with _lock:
             segments, info = transcriber.transcribe(
-                np.ascontiguousarray(audio), vad_filter=True, beam_size=1
+                audio, language=forced, vad_filter=True, beam_size=1
             )
             segs = list(segments)
+        if len(wanted) > 1 and _base_language(info.language) not in wanted:
+            with _lock:
+                segments, info = transcriber.transcribe(
+                    audio, language=wanted[0], vad_filter=True, beam_size=1
+                )
+                segs = list(segments)
         return ai.Transcript(
             source="upload",
-            language=info.language,
+            language=_base_language(info.language) or (wanted[0] if wanted else ""),
             language_probability=float(info.language_probability),
             duration=float(len(audio) / rate),
             segments=[Segment(float(s.start), float(s.end), s.text.strip()) for s in segs],
         )
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _base_language(code: str) -> str:
+    """``EN_gb`` → ``en``: whisper's codes are plain ISO 639-1 (plus a few)."""
+    return (code or "").strip().lower().replace("_", "-").split("-")[0]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -328,7 +357,13 @@ class Handler(BaseHTTPRequestHandler):
 
                 qs = parse_qs(urlparse(self.path).query)
                 model_size = (qs.get("model") or [self.headers.get("X-Whisper-Model") or DEFAULT_MODEL])[0]
-                transcript = _transcribe_bytes(blob, model_size)
+                # `languages=en,de` (what the app sends) plus repeated
+                # `language=` params, for a hand-run curl.
+                languages: list[str] = []
+                for part in qs.get("languages") or []:
+                    languages.extend(p for p in part.split(",") if p.strip())
+                languages.extend(qs.get("language") or [])
+                transcript = _transcribe_bytes(blob, model_size, tuple(languages))
                 payload = transcript.to_dict()
                 payload["model"] = model_size
                 self._json(200, payload)

@@ -324,10 +324,14 @@ def build_answer(question: str, hits: list[dict], model_name: str | None = None,
 
     # No model: the best passages ARE the answer. Never pretended otherwise.
     body = "\n\n".join(hit["text"] for hit in hits[:3])
+    cited = list(range(1, min(3, len(hits)) + 1))
+    # The app marks a source row by `cited`, so the flags must agree with the list.
+    for i, hit in enumerate(hits, start=1):
+        hit["cited"] = i in cited
     return {
         "answer": body,
         "sources": hits,
-        "cited": list(range(1, min(3, len(hits)) + 1)),
+        "cited": cited,
         "engine": "extractive · matching passages",
     }
 

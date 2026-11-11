@@ -13,9 +13,9 @@ import 'widgets.dart';
 /// Search across every transcribed take, or ask a question and get an answer
 /// with citations back to the take and timestamp.
 ///
-/// Both run on the machine with the AI service: the app pushes the text it
-/// already has (transcripts and summaries), retrieval happens there, and the
-/// answer comes from the same local model that writes the summaries.
+/// Both run on the device: the index is built from the notes the app already has,
+/// retrieval is local BM25, and only an answer's prose is written by a model — the
+/// chosen summary backend, or no model at all (the passages themselves).
 Future<void> openAsk(BuildContext context, Takes takes) async {
   final hit = await showModalBottomSheet<AskHit>(
     context: context,
@@ -65,7 +65,8 @@ class _AskSheetState extends State<_AskSheet> {
   @override
   void initState() {
     super.initState();
-    // The index is built from notes the app already has; sync once on open.
+    // The index is built from notes the app already has; rebuild it on open so a
+    // take transcribed since the last visit is searchable.
     takes.syncSearchIndex().then((_) {
       if (mounted) setState(() {});
     });
@@ -207,7 +208,7 @@ class _AskSheetState extends State<_AskSheet> {
                 count == 0
                     ? 'Search reads transcripts and summaries — transcribe a take first.'
                     : '$count ${count == 1 ? 'take' : 'takes'} · $passages '
-                        '${passages == 1 ? 'passage' : 'passages'} · searched on your machine',
+                        '${passages == 1 ? 'passage' : 'passages'} · searched on this device',
                 style: Tokens.caption,
               ),
             ],
@@ -305,16 +306,13 @@ class _AskSheetState extends State<_AskSheet> {
         style: Tokens.caption,
       );
     }
-    if (takes.indexing) {
-      return Text('Indexing the notes on this machine…', style: Tokens.caption);
-    }
     if (error != null) {
       return Text(error, style: Tokens.caption.copyWith(color: Tokens.danger));
     }
     if (_mode == _Mode.ask && _answer != null) {
       return Text(
         _answer!.extractive
-            ? 'No summary model yet, so these are the matching passages themselves.'
+            ? 'No model wrote this, so these are the matching passages themselves.'
             : 'Answered by ${_answer!.engine}',
         style: Tokens.caption,
       );

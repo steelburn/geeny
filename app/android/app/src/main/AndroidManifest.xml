@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <!-- On-device models are downloaded once, from the model hosts, by the user
+         tapping a size in Setup. Nothing else leaves the device. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:label="Geeny"

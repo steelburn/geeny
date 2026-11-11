@@ -98,6 +98,13 @@ as `python -m notra transcribe|summary` for the CLI. The app shows a notes sheet
 template chips (meeting / lecture / notes), summary bullets, and a timestamped transcript
 that seeks the player. No account and nothing leaves the machine.
 
+**Option 1 is implemented too, as of 2026-11-11.** The app's Setup routes speech and summary
+independently to *On this device* (sherpa-onnx whisper + llama.cpp GGUF, models downloaded
+into the app), *On this machine* (the service above) or an *external service*. Measured on
+the Lenovo tablet: 17 s Ogg Opus → transcript in ~9 s with `whisper tiny`, summary in ~20 s
+with a 0.5B GGUF. Both directions are useful: on-device is the offline default for a phone,
+the machine is where a 3B/7B summary is worth the wait. See `HANDOFF.md` §19.
+
 Deliberately *not* cloned: the vendor's Azure realtime streaming and its template catalogue.
 Realtime streaming would need a streaming ASR; our takes are short and pulled after the fact,
 so batch transcription is the better fit.
