@@ -1,4 +1,4 @@
-# notra_app
+# geeny_app
 
 **Geeny** — Flutter client for the Boya Notra Neo recorder. Scan, connect, record, pull takes,
 play them, and transcribe/summarise locally or through an OpenAI-compatible service.

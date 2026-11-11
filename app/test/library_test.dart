@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:notra_app/state/takes.dart';
+import 'package:geeny_app/state/takes.dart';
 
 Take take(String name) => Take(
       file: File('/tmp/$name'),

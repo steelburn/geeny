@@ -2,10 +2,10 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:notra_app/ble/link.dart';
-import 'package:notra_app/ble/notra_client.dart';
-import 'package:notra_app/protocol/crc.dart';
-import 'package:notra_app/protocol/frame.dart';
+import 'package:geeny_app/ble/link.dart';
+import 'package:geeny_app/ble/notra_client.dart';
+import 'package:geeny_app/protocol/crc.dart';
+import 'package:geeny_app/protocol/frame.dart';
 
 /// A stand-in for the recorder: answers the same frames the hardware answers,
 /// with payloads copied from the live capture. Proves the Dart session layer

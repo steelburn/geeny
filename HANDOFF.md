@@ -471,13 +471,19 @@ and `qwen2.5-7b · 4.7 GB`; tapping 3B downloaded it in ~15 s and the app select
   (`Geeny.`), the web console (`<title>` + `<h1>`) and the docs now say Geeny. The device is
   still the Boya Notra Neo, so the `notra/` Python package, `NotraClient`, the BLE scan filters
   and the protocol notes keep that name.
-- **Internals were left alone on purpose.** Dart package `notra_app` and application id
-  `dev.notra.notra_app` are unchanged: renaming the id would install a second app and orphan
-  the existing takes/notes/library under the old package. Only the user-facing name changed.
+- **Package and application id renamed too.** Dart package `geeny_app`; Android namespace and
+  application id `dev.geeny.app`; `MainActivity` moved to
+  `android/app/src/main/kotlin/dev/geeny/app/`. Because the id changed, the app installs as a
+  new package; the existing `app_flutter` (takes, `.notes.json`, `library.json`,
+  `projects.json`) and `shared_prefs/FlutterSharedPreferences.xml` were copied from
+  `dev.notra.notra_app` to `dev.geeny.app` with `run-as`, absolute paths in `library.json`
+  rewritten to the new package, file mtimes restored, and the old package removed.
 - **New icon.** `scripts/make_icon.py` now draws a geometric paper **G** on forest stock with
   one sage recording light, replacing the microphone mark. It regenerates the five legacy
   mipmaps, `mipmap-anydpi-v26` (adaptive + monochrome), the vector foreground,
   `values/colors.xml`, `app/assets/brand/icon.svg` and `web/favicon.svg`.
-- **Verified:** `aapt2 dump badging` reports `application-label:'Geeny'`; the launcher/splash
-  shows the G mark and the app drawer lists **Geeny**; the home header reads `Geeny.`;
+- **Verified:** `aapt2 dump badging` reports `application-label:'Geeny'` and
+  `package: name='dev.geeny.app'`; the launcher/splash shows the G mark and the app drawer
+  lists **Geeny**; the home header reads `Geeny.`; after migration the new id shows all 7
+  takes, the editable title, the Sampling assignment, the cached notes and the 3B AI settings;
   `flutter analyze` clean; 34 tests pass.

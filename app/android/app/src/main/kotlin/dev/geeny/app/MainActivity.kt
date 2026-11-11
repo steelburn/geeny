@@ -1,4 +1,4 @@
-package dev.notra.notra_app
+package dev.geeny.app
 
 import io.flutter.embedding.android.FlutterActivity
 

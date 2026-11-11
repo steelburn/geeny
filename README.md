@@ -41,10 +41,13 @@ web console (`DESIGN.md`), same frame codec, same CRC tables.
 
 ```bash
 cd app
-flutter test                     # 11 tests: codec, CRCs, TLV, heartbeat, pull - no hardware
+flutter test                     # 34 tests: codec, CRCs, session flow, notes, storage
 flutter build apk --debug        # -> build/app/outputs/flutter-apk/app-debug.apk
 adb install -r build/app/outputs/flutter-apk/app-debug.apk
 ```
+
+The Android package id is `dev.geeny.app` (Dart package `geeny_app`); the launcher label is
+**Geeny**.
 
 It scans and connects (no pairing), sends the heartbeat every 4 s so commands are accepted,
 shows the device's battery (`attr 0x01`), toggles noise reduction (`attr 0x05`) and mic gain

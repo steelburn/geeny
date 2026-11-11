@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:notra_app/protocol/assembler.dart';
-import 'package:notra_app/protocol/crc.dart';
-import 'package:notra_app/ble/notra_client.dart';
-import 'package:notra_app/protocol/frame.dart';
+import 'package:geeny_app/protocol/assembler.dart';
+import 'package:geeny_app/protocol/crc.dart';
+import 'package:geeny_app/ble/notra_client.dart';
+import 'package:geeny_app/protocol/frame.dart';
 
 List<int> fromHex(String s) => [
       for (var i = 0; i < s.length; i += 2) int.parse(s.substring(i, i + 2), radix: 16)

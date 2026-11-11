@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:notra_app/ai/ai_settings.dart';
-import 'package:notra_app/ai/notes.dart';
+import 'package:geeny_app/ai/ai_settings.dart';
+import 'package:geeny_app/ai/notes.dart';
 
 TakeNotes notes({
   String template = 'meeting',
